@@ -22,11 +22,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,19 +46,26 @@ import (
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/snapshots"
+	"github.com/deislabs/oras/pkg/oras"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 	"golang.org/x/sync/errgroup"
+	auth "oras.land/oras-go/pkg/auth/docker"
 )
 
 var (
-	emptyString string
-	emptyDesc   ocispec.Descriptor
-	emptyLayer  layer
+	artifactDest string
+	emptyString  string
+	emptyDesc    ocispec.Descriptor
+	emptyLayer   layer
+	password     string
+	username     string
 
+	artifactTypeName       = "dadi.image.v1"
 	convSnapshotNameFormat = "overlaybd-conv-%s"
 	convLeaseNameFormat    = convSnapshotNameFormat
 	convContentNameFormat  = convSnapshotNameFormat
@@ -83,6 +92,21 @@ var convertCommand = cli.Command{
 			Usage:  "build base layer only",
 			Hidden: false,
 		},
+		cli.StringFlag{
+			Name:  "artifactdst",
+			Usage: "artifact registry destination(required), used to convert to OCI Artifact, add original manifest as referrer, and push to a registry",
+			Value: "",
+		},
+		cli.StringFlag{
+			Name:  "username",
+			Usage: "username of artifact destination registry(required), used for authenticating to destination artifact registry",
+			Value: "",
+		},
+		cli.StringFlag{
+			Name:  "password",
+			Usage: "password of artifact destination registry(required), used for authenticating to destination artifact registry",
+			Value: "",
+		},
 	},
 	Action: func(context *cli.Context) error {
 		var (
@@ -90,8 +114,16 @@ var convertCommand = cli.Command{
 			targetImage = context.Args().Get(1)
 		)
 
+		artifactDest = context.String("artifactdst")
+		username = context.String("username")
+		password = context.String("password")
+
 		if (srcImage == "" || targetImage == "") && !context.Bool("build-baselayer-only") {
 			return errors.New("please provide src image name(must in local) and dest image name")
+		}
+
+		if artifactDest != "" && (username == "" || password == "") {
+			return errors.New("must provide username and password if converting and pushing artifact")
 		}
 
 		cli, ctx, cancel, err := commands.NewClient(context)
@@ -664,4 +696,91 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 	n, err = wc.w.Write(p)
 	wc.c += int64(n)
 	return
+}
+
+func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string) (desc ocispec.Descriptor, err error) {
+	insecure := true
+	plainHTTP := false
+
+	resolver := newResolver(username, password, insecure, plainHTTP)
+
+	// bake artifact
+	var pushOpts []oras.PushOpt
+	// referManifest, err := loadReference(ctx, resolver, referRef)
+	// if err != nil {
+	// 	return ocispec.Descriptor{}, err
+	// }
+	// log.Println("loaded the subject artifact reference")
+	pushOpts = append(pushOpts, oras.AsArtifact(artifactTypeName, srcManifestDesc))
+	blobs := obdManifest.Layers
+	blobs = append([]ocispec.Descriptor{obdManifest.Config}, blobs...)
+
+	// ready to push
+	pushOpts = append(pushOpts, oras.WithPushStatusTrack(os.Stdout))
+	pushOpts = append(pushOpts, oras.WithNameValidation(nil))
+	retDesc, err := oras.Push(ctx, resolver, artifactDest, cs, blobs, pushOpts...)
+	if err != nil {
+		return ocispec.Descriptor{}, err
+	}
+	fmt.Println("Pushed", artifactDest)
+	fmt.Println("Digest:", retDesc.Digest)
+	return retDesc, nil
+}
+
+func readJSON(ctx context.Context, cs content.Store, x interface{}, desc ocispec.Descriptor) (map[string]string, error) {
+	info, err := cs.Info(ctx, desc.Digest)
+	if err != nil {
+		return nil, err
+	}
+	labels := info.Labels
+	b, err := content.ReadBlob(ctx, cs, desc)
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, x); err != nil {
+		return nil, err
+	}
+	return labels, nil
+}
+
+func loadReference(ctx context.Context, resolver remotes.Resolver, reference string) (ocispec.Descriptor, error) {
+	_, desc, err := resolver.Resolve(ctx, reference)
+	if err != nil {
+		return desc, errors.Wrapf(err, "failed to resolve ref %q", reference)
+	}
+	return desc, nil
+}
+
+func newResolver(username, password string, insecure bool, plainHTTP bool, configs ...string) remotes.Resolver {
+
+	opts := docker.ResolverOptions{
+		PlainHTTP: plainHTTP,
+	}
+
+	client := http.DefaultClient
+	if insecure {
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		}
+	}
+	opts.Client = client
+
+	if username != "" || password != "" {
+		opts.Credentials = func(hostName string) (string, string, error) {
+			return username, password, nil
+		}
+		return docker.NewResolver(opts)
+	}
+	cli, err := auth.NewClient(configs...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: Error loading auth file: %v\n", err)
+	}
+	resolver, err := cli.Resolver(context.Background(), client, plainHTTP)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: Error loading resolver: %v\n", err)
+		resolver = docker.NewResolver(opts)
+	}
+	return resolver
 }
