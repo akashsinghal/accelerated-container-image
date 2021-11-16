@@ -58,12 +58,11 @@ import (
 )
 
 var (
-	artifactDest string
-	emptyString  string
-	emptyDesc    ocispec.Descriptor
-	emptyLayer   layer
-	password     string
-	username     string
+	emptyString string
+	emptyDesc   ocispec.Descriptor
+	emptyLayer  layer
+	password    string
+	username    string
 
 	artifactTypeName       = "dadi.image.v1"
 	convSnapshotNameFormat = "overlaybd-conv-%s"
@@ -92,10 +91,10 @@ var convertCommand = cli.Command{
 			Usage:  "build base layer only",
 			Hidden: false,
 		},
-		cli.StringFlag{
-			Name:  "artifactdst",
-			Usage: "artifact registry destination(required), used to convert to OCI Artifact, add original manifest as referrer, and push to a registry",
-			Value: "",
+		cli.BoolFlag{
+			Name:   "push-artifact",
+			Usage:  "convert to OCI Artifact, add original manifest as referrer, and push to specified registry",
+			Hidden: false,
 		},
 		cli.StringFlag{
 			Name:  "username",
@@ -114,7 +113,6 @@ var convertCommand = cli.Command{
 			targetImage = context.Args().Get(1)
 		)
 
-		artifactDest = context.String("artifactdst")
 		username = context.String("username")
 		password = context.String("password")
 
@@ -122,7 +120,7 @@ var convertCommand = cli.Command{
 			return errors.New("please provide src image name(must in local) and dest image name")
 		}
 
-		if artifactDest != "" && (username == "" || password == "") {
+		if context.Bool("push-artifact") && (username == "" || password == "") {
 			return errors.New("must provide username and password if converting and pushing artifact")
 		}
 
@@ -202,7 +200,18 @@ var convertCommand = cli.Command{
 			Name:   targetImage,
 			Target: newMfstDesc,
 		}
-		return createImage(ctx, cli.ImageService(), newImage)
+		err = createImage(ctx, cli.ImageService(), newImage)
+		if err != nil {
+			return err
+		}
+		if context.Bool("push-artifact") {
+			newImageManifest, err := images.Manifest(ctx, cs, newMfstDesc, platforms.Default())
+			if err != nil {
+				return err
+			}
+			return prepareArtifactAndPush(ctx, cs, srcImg.Target(), newImageManifest, targetImage)
+		}
+		return nil
 	},
 }
 
@@ -698,7 +707,7 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 	return
 }
 
-func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string) (desc ocispec.Descriptor, err error) {
+func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string) error {
 	insecure := true
 	plainHTTP := false
 
@@ -706,11 +715,6 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 
 	// bake artifact
 	var pushOpts []oras.PushOpt
-	// referManifest, err := loadReference(ctx, resolver, referRef)
-	// if err != nil {
-	// 	return ocispec.Descriptor{}, err
-	// }
-	// log.Println("loaded the subject artifact reference")
 	pushOpts = append(pushOpts, oras.AsArtifact(artifactTypeName, srcManifestDesc))
 	blobs := obdManifest.Layers
 	blobs = append([]ocispec.Descriptor{obdManifest.Config}, blobs...)
@@ -720,35 +724,11 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	pushOpts = append(pushOpts, oras.WithNameValidation(nil))
 	retDesc, err := oras.Push(ctx, resolver, artifactDest, cs, blobs, pushOpts...)
 	if err != nil {
-		return ocispec.Descriptor{}, err
+		return err
 	}
 	fmt.Println("Pushed", artifactDest)
 	fmt.Println("Digest:", retDesc.Digest)
-	return retDesc, nil
-}
-
-func readJSON(ctx context.Context, cs content.Store, x interface{}, desc ocispec.Descriptor) (map[string]string, error) {
-	info, err := cs.Info(ctx, desc.Digest)
-	if err != nil {
-		return nil, err
-	}
-	labels := info.Labels
-	b, err := content.ReadBlob(ctx, cs, desc)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(b, x); err != nil {
-		return nil, err
-	}
-	return labels, nil
-}
-
-func loadReference(ctx context.Context, resolver remotes.Resolver, reference string) (ocispec.Descriptor, error) {
-	_, desc, err := resolver.Resolve(ctx, reference)
-	if err != nil {
-		return desc, errors.Wrapf(err, "failed to resolve ref %q", reference)
-	}
-	return desc, nil
+	return nil
 }
 
 func newResolver(username, password string, insecure bool, plainHTTP bool, configs ...string) remotes.Resolver {
