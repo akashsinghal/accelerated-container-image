@@ -35,5 +35,5 @@ replace (
 	github.com/containerd/containerd/api => github.com/oras-project/containerd/api v0.0.0-20210914182246-c90d5cff6817
 	github.com/deislabs/oras v0.2.1-alpha.1 => /home/akashsinghal/go/pkg/mod/oras-0.2.1-alpha.1
 	github.com/elazarl/goproxy => github.com/taoting1234/goproxy v0.0.0-20210901033843-ebf581737889
-	github.com/oras-project/artifacts-spec => github.com/oras-project/artifacts-spec v0.0.0-20210910233110-813953a626ae
+	github.com/oras-project/artifacts-spec => github.com/oras-project/artifacts-spec v0.0.0-20211117234821-a732a936a0ff
 )

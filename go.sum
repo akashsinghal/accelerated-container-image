@@ -684,6 +684,8 @@ github.com/opencontainers/selinux v1.8.2/go.mod h1:MUIHuUEvKB1wtJjQdOyYRgOnLD2xA
 github.com/opentracing/opentracing-go v1.1.0/go.mod h1:UkNAQd3GIcIGf0SeVgPpRdFStlNbqXla1AfSYxPUl2o=
 github.com/oras-project/artifacts-spec v0.0.0-20210910233110-813953a626ae h1:vw1ccIckPxFFx3/wW8SaVLtvQ5viAduN+fuku8KbEfo=
 github.com/oras-project/artifacts-spec v0.0.0-20210910233110-813953a626ae/go.mod h1:Xch2aLzSwtkhbFFN6LUzTfLtukYvMMdXJ4oZ8O7BOdc=
+github.com/oras-project/artifacts-spec v0.0.0-20211117234821-a732a936a0ff h1:X5cJPH4BnuVW49GIo/eT+9nPeNUOUe4iX3313IKPauE=
+github.com/oras-project/artifacts-spec v0.0.0-20211117234821-a732a936a0ff/go.mod h1:Xch2aLzSwtkhbFFN6LUzTfLtukYvMMdXJ4oZ8O7BOdc=
 github.com/oras-project/containerd v1.5.0-beta.4.0.20210914182246-c90d5cff6817 h1:fxE+f93ZigjjpX9PV6ASRW3nKCZh8a5OV09ByVsBytg=
 github.com/oras-project/containerd v1.5.0-beta.4.0.20210914182246-c90d5cff6817/go.mod h1:FO7TFjLu1ee+CEX6DolquUjzdh766/dqT1YAT6WgrFE=
 github.com/oras-project/containerd/api v0.0.0-20210914182246-c90d5cff6817 h1:raariPDp41Zw69PoDDRR+mL44xrxBMlwz3K6IiEPSls=
