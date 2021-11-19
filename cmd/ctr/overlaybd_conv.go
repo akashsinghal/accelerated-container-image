@@ -63,6 +63,9 @@ var (
 	emptyLayer  layer
 	password    string
 	username    string
+	plainHTTP   bool
+	insecure    bool
+	configs     []string
 
 	artifactTypeName       = "dadi.image.v1"
 	convSnapshotNameFormat = "overlaybd-conv-%s"
@@ -106,6 +109,20 @@ var convertCommand = cli.Command{
 			Usage: "password of artifact destination registry(required), used for authenticating to destination artifact registry",
 			Value: "",
 		},
+		cli.BoolFlag{
+			Name:   "insecure",
+			Usage:  "allow connections to SSL registry without certs",
+			Hidden: false,
+		},
+		cli.BoolFlag{
+			Name:   "plain-http",
+			Usage:  "use plain http and not https when pushing to registry",
+			Hidden: false,
+		},
+		cli.StringSliceFlag{
+			Name:  "config",
+			Usage: "auth config path",
+		},
 	},
 	Action: func(context *cli.Context) error {
 		var (
@@ -115,13 +132,12 @@ var convertCommand = cli.Command{
 
 		username = context.String("username")
 		password = context.String("password")
+		plainHTTP = context.Bool("plain-http")
+		insecure = context.Bool("insecure")
+		configs = context.StringSlice("config")
 
 		if (srcImage == "" || targetImage == "") && !context.Bool("build-baselayer-only") {
 			return errors.New("please provide src image name(must in local) and dest image name")
-		}
-
-		if context.Bool("push-artifact") && (username == "" || password == "") {
-			return errors.New("must provide username and password if converting and pushing artifact")
 		}
 
 		cli, ctx, cancel, err := commands.NewClient(context)
@@ -708,18 +724,15 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 }
 
 func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string) error {
-	insecure := true
-	plainHTTP := false
+	resolver := newResolver(username, password, insecure, plainHTTP, configs...)
 
-	resolver := newResolver(username, password, insecure, plainHTTP)
-
-	// bake artifact
+	// create artifact
 	var pushOpts []oras.PushOpt
 	pushOpts = append(pushOpts, oras.AsArtifact(artifactTypeName, srcManifestDesc))
 	blobs := obdManifest.Layers
 	blobs = append([]ocispec.Descriptor{obdManifest.Config}, blobs...)
 
-	// ready to push
+	// push the artifact to registry
 	pushOpts = append(pushOpts, oras.WithPushStatusTrack(os.Stdout))
 	pushOpts = append(pushOpts, oras.WithNameValidation(nil))
 	retDesc, err := oras.Push(ctx, resolver, artifactDest, cs, blobs, pushOpts...)

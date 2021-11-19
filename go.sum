@@ -690,6 +690,8 @@ github.com/oras-project/containerd v1.5.0-beta.4.0.20210914182246-c90d5cff6817 h
 github.com/oras-project/containerd v1.5.0-beta.4.0.20210914182246-c90d5cff6817/go.mod h1:FO7TFjLu1ee+CEX6DolquUjzdh766/dqT1YAT6WgrFE=
 github.com/oras-project/containerd/api v0.0.0-20210914182246-c90d5cff6817 h1:raariPDp41Zw69PoDDRR+mL44xrxBMlwz3K6IiEPSls=
 github.com/oras-project/containerd/api v0.0.0-20210914182246-c90d5cff6817/go.mod h1:ysm3V7pK5ZnQfXrrHZDUNNih/ZXnZwLPygddnlsrGBA=
+github.com/oras-project/oras v0.0.0-20211111051810-58fa344544b3 h1:BeyNIrQ5pAuyzb2M2/Ey48+skw0HDxQ+Ar5G+2eFy/g=
+github.com/oras-project/oras v0.0.0-20211111051810-58fa344544b3/go.mod h1:ewPnK+DK8yqOthv1OaWcQslcMJ8NkKT46atcZRm3AfM=
 github.com/pascaldekloe/goe v0.0.0-20180627143212-57f6aae5913c/go.mod h1:lzWF7FIEvWOWxwDKqyGYQf6ZUaNfKdP144TG7ZOy1lc=
 github.com/pelletier/go-toml v1.2.0/go.mod h1:5z9KED0ma1S8pY6P1sdut58dfprrGBbd/94hg7ilaic=
 github.com/pelletier/go-toml v1.8.1/go.mod h1:T2/BmBdy8dvIRq1a/8aqjN41wvWlN4lrapLU/GW4pbc=

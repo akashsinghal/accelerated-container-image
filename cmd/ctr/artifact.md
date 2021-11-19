@@ -32,12 +32,13 @@ New Conversion Flow:
 
 ## New Dependencies
 
-- ORAS Go Module: github.com/deislabs/oras 
+- ORAS Go Module: github.com/deislabs/oras v0.2.1-alpha.1
 - ORAS containerd: github.com/oras-project/containerd/api
 - ORAS Artifact Spec: github.com/oras-project/artifacts-spec
 
 ## Performance
 
+`obdconv` exection now takes ~ 16.62 seconds to complete for a redis image
 
 ## Converting from DADI OCI Image to DADI OCI Artifact
 
