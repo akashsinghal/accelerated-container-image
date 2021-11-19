@@ -11,7 +11,7 @@ There are a few primary motivations for using OCI Artifact:
 
 ## Proposed DADI conversion Process:
 
-The current `obdconv` command for the custom `ctr` cli will be changed to add a `--push-artifact` flag along with required `--username` and `--password` fields for the target registry credentials. 
+The current `obdconv` command for the custom `ctr` cli will be changed to add a `--push-artifact`. For registry authentication, the `--username` and `--password` can be provided OR the `--config` can be filled with the auth config file path. By default if no username/password or auth file is provided, the docker config will be used.
 
 ```
 sudo bin/ctr obdconv --push-artifact --username <TARGET-REGISTRY-USERNAME> --password <TARGET-REGISTRY-PASSWORD> artifactstest.azurecr.io/teleport/redis:original artifactstest.azurecr.io/teleport/redis:oras
