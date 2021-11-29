@@ -48,13 +48,17 @@ import (
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/deislabs/oras/pkg/oras"
+	"github.com/sirupsen/logrus"
+
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	artifactspec "github.com/oras-project/artifacts-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 	"golang.org/x/sync/errgroup"
 	auth "oras.land/oras-go/pkg/auth/docker"
+	orascontent "oras.land/oras-go/pkg/content"
+	"oras.land/oras-go/pkg/oras"
 )
 
 var (
@@ -125,6 +129,7 @@ var convertCommand = cli.Command{
 		},
 	},
 	Action: func(context *cli.Context) error {
+		logrus.SetLevel(logrus.DebugLevel)
 		var (
 			srcImage    = context.Args().First()
 			targetImage = context.Args().Get(1)
@@ -225,7 +230,7 @@ var convertCommand = cli.Command{
 			if err != nil {
 				return err
 			}
-			return prepareArtifactAndPush(ctx, cs, srcImg.Target(), newImageManifest, targetImage)
+			return prepareArtifactAndPush(ctx, cs, srcImg.Target(), newImageManifest, targetImage, cli.ImageService())
 		}
 		return nil
 	},
@@ -723,22 +728,84 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 	return
 }
 
-func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string) error {
+func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string, is images.Store) error {
 	resolver := newResolver(username, password, insecure, plainHTTP, configs...)
 
 	// create artifact
-	var pushOpts []oras.PushOpt
-	pushOpts = append(pushOpts, oras.AsArtifact(artifactTypeName, srcManifestDesc))
-	blobs := obdManifest.Layers
-	blobs = append([]ocispec.Descriptor{obdManifest.Config}, blobs...)
+	var blobDesc []artifactspec.Descriptor
+	for _, layer := range obdManifest.Layers {
+		blobDesc = append(blobDesc, artifactspec.Descriptor{
+			MediaType:   layer.MediaType,
+			Digest:      layer.Digest,
+			Size:        layer.Size,
+			URLs:        layer.URLs,
+			Annotations: layer.Annotations,
+		})
+	}
+	artifactManifest := artifactspec.Manifest{
+		MediaType:    "application/vnd.cncf.oras.artifact.manifest.v1+json",
+		Blobs:        blobDesc,
+		ArtifactType: artifactTypeName,
+		Subject: artifactspec.Descriptor{
+			MediaType:   srcManifestDesc.MediaType,
+			Digest:      srcManifestDesc.Digest,
+			Size:        srcManifestDesc.Size,
+			URLs:        srcManifestDesc.URLs,
+			Annotations: srcManifestDesc.Annotations,
+		},
+	}
 
-	// push the artifact to registry
-	pushOpts = append(pushOpts, oras.WithPushStatusTrack(os.Stdout))
-	pushOpts = append(pushOpts, oras.WithNameValidation(nil))
-	retDesc, err := oras.Push(ctx, resolver, artifactDest, cs, blobs, pushOpts...)
+	manifestBytes, err := json.MarshalIndent(artifactManifest, "", "   ")
 	if err != nil {
 		return err
 	}
+	manifestDescriptor := ocispec.Descriptor{
+		MediaType: artifactspec.MediaTypeArtifactManifest,
+		Digest:    digest.Canonical.FromBytes(manifestBytes),
+		Size:      int64(len(manifestBytes)),
+	}
+	fmt.Println(manifestDescriptor)
+	fmt.Println(manifestDescriptor.Digest)
+
+	// store artifact manifest in content store
+	refName := remotes.MakeRefKey(ctx, manifestDescriptor)
+	labels := map[string]string{}
+	labels["artifact"] = string(manifestDescriptor.Digest)
+	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
+	// fmt.Println(cs.Info(ctx, manifestDescriptor.Digest))
+	if err != nil {
+		return err
+	}
+
+	// // create new artifact image in content store
+	// artifactImage := images.Image{
+	// 	Name:   "testimage123",
+	// 	Target: manifestDescriptor,
+	// }
+
+	// err = createImage(ctx, is, artifactImage)
+	// if err != nil {
+	// 	return err
+	// }
+
+	// push the artifact to registry
+	var copyOpts []oras.CopyOpt
+	artifactStore, err := orascontent.NewOCI("/var/lib/containerd/io.containerd.content.v1.content")
+	if err != nil {
+		return err
+	}
+	artifactStore.AddReference(refName, manifestDescriptor)
+	err = artifactStore.SaveIndex()
+	if err != nil {
+		return err
+	}
+	copyOpts = append(copyOpts, oras.WithPullStatusTrack(os.Stdout))
+	copyOpts = append(copyOpts, oras.WithNameValidation(nil))
+	retDesc, err := oras.Copy(ctx, artifactStore, refName, resolver, artifactDest, copyOpts...)
+	if err != nil {
+		return err
+	}
+
 	fmt.Println("Pushed", artifactDest)
 	fmt.Println("Digest:", retDesc.Digest)
 	return nil
