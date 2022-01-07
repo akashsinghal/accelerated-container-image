@@ -46,7 +46,6 @@ import (
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/sirupsen/logrus"
 
@@ -56,9 +55,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 	"golang.org/x/sync/errgroup"
-	auth "oras.land/oras-go/pkg/auth/docker"
-	orascontent "oras.land/oras-go/pkg/content"
-	"oras.land/oras-go/pkg/oras"
+
+	"oras.land/oras-go/v2"
+	ocitarget "oras.land/oras-go/v2/content/oci"
+	registry "oras.land/oras-go/v2/registry/remote"
+	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 )
 
 var (
@@ -689,8 +690,6 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 }
 
 func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string, is images.Store) error {
-	resolver := newResolver(username, password, insecure, plainHTTP, configs...)
-
 	// create artifact
 	var blobDesc []artifactspec.Descriptor
 	for _, layer := range obdManifest.Layers {
@@ -726,42 +725,57 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	}
 	fmt.Println(manifestDescriptor)
 	fmt.Println(manifestDescriptor.Digest)
+	fmt.Println(artifactManifest)
 
 	// store artifact manifest in content store
 	refName := remotes.MakeRefKey(ctx, manifestDescriptor)
 	labels := map[string]string{}
 	labels["artifact"] = string(manifestDescriptor.Digest)
 	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
-	// fmt.Println(cs.Info(ctx, manifestDescriptor.Digest))
+	fmt.Println(cs.Info(ctx, manifestDescriptor.Digest))
 	if err != nil {
 		return err
 	}
-
-	// // create new artifact image in content store
-	// artifactImage := images.Image{
-	// 	Name:   "testimage123",
-	// 	Target: manifestDescriptor,
-	// }
-
-	// err = createImage(ctx, is, artifactImage)
-	// if err != nil {
-	// 	return err
-	// }
 
 	// push the artifact to registry
-	var copyOpts []oras.CopyOpt
-	artifactStore, err := orascontent.NewOCI("/var/lib/containerd/io.containerd.content.v1.content")
+	artifactStore, err := ocitarget.New("/var/lib/containerd/io.containerd.content.v1.content")
 	if err != nil {
 		return err
 	}
-	artifactStore.AddReference(refName, manifestDescriptor)
-	err = artifactStore.SaveIndex()
+	err = artifactStore.Tag(ctx, manifestDescriptor, refName)
 	if err != nil {
 		return err
 	}
-	copyOpts = append(copyOpts, oras.WithPullStatusTrack(os.Stdout))
-	copyOpts = append(copyOpts, oras.WithNameValidation(nil))
-	retDesc, err := oras.Copy(ctx, artifactStore, refName, resolver, artifactDest, copyOpts...)
+
+	// Create Repository Target
+	repository, err := registry.NewRepository(artifactDest)
+	if err != nil {
+		return err
+	}
+	// Set the Repository Client Credentials
+	repoClient := &orasauth.Client{
+		Header: http.Header{
+			"User-Agent": {"oras-go"},
+		},
+		Cache:      orasauth.DefaultCache,
+		Credential: credentialProvider,
+	}
+	// Set the TSLClientConfig for HTTP client if insecure set to true
+	if insecure {
+		repoClient.Client = http.DefaultClient
+		repoClient.Client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		}
+	}
+	// Set the PlainHTTP to true if specified
+	repository.PlainHTTP = plainHTTP
+
+	repository.Client = repoClient
+
+	// Copy the artifact manifest to remote Repository
+	retDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactDest)
 	if err != nil {
 		return err
 	}
@@ -771,36 +785,14 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	return nil
 }
 
-func newResolver(username, password string, insecure bool, plainHTTP bool, configs ...string) remotes.Resolver {
-
-	opts := docker.ResolverOptions{
-		PlainHTTP: plainHTTP,
-	}
-
-	client := http.DefaultClient
-	if insecure {
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		}
-	}
-	opts.Client = client
-
+func credentialProvider(ctx context.Context, registry string) (orasauth.Credential, error) {
 	if username != "" || password != "" {
-		opts.Credentials = func(hostName string) (string, string, error) {
-			return username, password, nil
-		}
-		return docker.NewResolver(opts)
+		return orasauth.Credential{
+			Username: username,
+			Password: password,
+		}, nil
 	}
-	cli, err := auth.NewClient(configs...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: Error loading auth file: %v\n", err)
-	}
-	resolver, err := cli.Resolver(context.Background(), client, plainHTTP)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "WARNING: Error loading resolver: %v\n", err)
-		resolver = docker.NewResolver(opts)
-	}
-	return resolver
+
+	//TODO: handle dockerconfig
+	return orasauth.EmptyCredential, nil
 }
