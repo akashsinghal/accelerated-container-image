@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,7 +31,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,11 +45,14 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/reference"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/sirupsen/logrus"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	artifactspec "github.com/oras-project/artifacts-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -60,6 +63,16 @@ import (
 	ocitarget "oras.land/oras-go/v2/content/oci"
 	registry "oras.land/oras-go/v2/registry/remote"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
+)
+
+const (
+	labelOverlayBDBlobDigest   = "containerd.io/snapshot/overlaybd/blob-digest"
+	labelOverlayBDBlobSize     = "containerd.io/snapshot/overlaybd/blob-size"
+	labelOverlayBDBlobFsType   = "containerd.io/snapshot/overlaybd/blob-fs-type"
+	labelOverlayBDBlobWritable = "containerd.io/snapshot/overlaybd.writable"
+	labelKeyAccelerationLayer  = "containerd.io/snapshot/overlaybd/acceleration-layer"
+	labelBuildLayerFrom        = "containerd.io/snapshot/overlaybd/build.layer-from"
+	labelDistributionSource    = "containerd.io/distribution.source"
 )
 
 var (
@@ -78,26 +91,25 @@ var (
 	convContentNameFormat  = convSnapshotNameFormat
 )
 
+type ImageConvertor interface {
+	Convert(ctx context.Context, srcManifest ocispec.Manifest, fsType string) (ocispec.Descriptor, error)
+}
+
 var convertCommand = cli.Command{
 	Name:        "obdconv",
 	Usage:       "convert image layer into overlaybd format type",
 	ArgsUsage:   "<src-image> <dst-image>",
 	Description: `Export images to an OCI tar[.gz] into zfile format`,
-	Flags: []cli.Flag{
-		cli.StringFlag{
-			Name:  "basepath",
-			Usage: "baselayer path(required), used to init block device",
-			Value: "/opt/overlaybd/baselayers/ext4_64",
-		},
+	Flags: append(commands.RegistryFlags,
 		cli.StringFlag{
 			Name:  "fstype",
 			Usage: "filesystem type(required), used to mount block device, support specifying mount options and mkfs options, separate fs type and options by ';', separate mount options by ',', separate mkfs options by ' '",
 			Value: "ext4",
 		},
-		cli.BoolFlag{
-			Name:   "build-baselayer-only",
-			Usage:  "build base layer only",
-			Hidden: false,
+		cli.StringFlag{
+			Name:  "dbstr",
+			Usage: "data base config string used for layer deduplication",
+			Value: "",
 		},
 		cli.BoolFlag{
 			Name:   "push-artifact",
@@ -128,7 +140,7 @@ var convertCommand = cli.Command{
 			Name:  "config",
 			Usage: "auth config path",
 		},
-	},
+	),
 	Action: func(context *cli.Context) error {
 		logrus.SetLevel(logrus.DebugLevel)
 		var (
@@ -142,7 +154,7 @@ var convertCommand = cli.Command{
 		insecure = context.Bool("insecure")
 		configs = context.StringSlice("config")
 
-		if (srcImage == "" || targetImage == "") && !context.Bool("build-baselayer-only") {
+		if srcImage == "" || targetImage == "" {
 			return errors.New("please provide src image name(must in local) and dest image name")
 		}
 
@@ -167,35 +179,10 @@ var convertCommand = cli.Command{
 		)
 
 		fsType := context.String("fstype")
-		fmt.Printf("file system type: %s\n", fsType)
-		basePath := context.String("basepath")
-		fmt.Printf("base layer path: %s\n", basePath)
-		var baseLayer *layer = nil
-		_, exist := os.Stat(basePath)
-		if exist == nil {
-			if context.Bool("build-baselayer-only") {
-				fmt.Printf("build base layer only, base layer exists, build base layer failed\n")
-				return nil
-			}
-			loader := newContentLoaderWithFsType(false, fsType, contentFile{
-				context.String("basepath"), "overlaybd.commit"})
-			l, err := loader.Load(ctx, cs)
-			if err != nil {
-				return errors.Wrap(err, "failed to load baselayer into content.Store")
-			}
-			baseLayer = &l
-		} else {
-			fmt.Printf("base layer does not exist, then build it\n")
-			if context.Bool("build-baselayer-only") {
-				fmt.Printf("build base layer only\n")
-				_, err = buildBaseLayerInZfile(ctx, sn, fsType, basePath)
-				if err == nil {
-					fmt.Printf("build base layer successfully\n")
-				} else {
-					fmt.Printf("build base layer failed\n")
-				}
-				return err
-			}
+		fmt.Printf("filesystem type: %s\n", fsType)
+		dbstr := context.String("dbstr")
+		if dbstr != "" {
+			fmt.Printf("database config string: %s\n", dbstr)
 		}
 
 		srcImg, err := ensureImageExist(ctx, cli, srcImage)
@@ -208,12 +195,16 @@ var convertCommand = cli.Command{
 			return errors.Wrapf(err, "failed to read manifest")
 		}
 
-		committedLayers, err := convOCIV1LayersToZfile(ctx, sn, cs, baseLayer, srcManifest.Layers, fsType, basePath)
+		resolver, err := commands.GetResolver(ctx, context)
 		if err != nil {
 			return err
 		}
 
-		newMfstDesc, err := commitOverlaybdImage(ctx, cs, srcManifest, committedLayers)
+		c, err := NewOverlaybdConvertor(ctx, cs, sn, resolver, targetImage, dbstr)
+		if err != nil {
+			return err
+		}
+		newMfstDesc, err := c.Convert(ctx, srcManifest, fsType)
 		if err != nil {
 			return err
 		}
@@ -263,14 +254,6 @@ type contentLoader struct {
 }
 
 func (loader *contentLoader) Load(ctx context.Context, cs content.Store) (l layer, err error) {
-	const (
-		annoOverlayBDBlobDigest  = "containerd.io/snapshot/overlaybd/blob-digest"
-		annoOverlayBDBlobSize    = "containerd.io/snapshot/overlaybd/blob-size"
-		annoOverlayBDBlobFsType  = "containerd.io/snapshot/overlaybd/blob-fs-type"
-		annoKeyAccelerationLayer = "containerd.io/snapshot/overlaybd/acceleration-layer"
-		labelBuildLayerFrom      = "containerd.io/snapshot/overlaybd/build.layer-from"
-	)
-
 	refName := fmt.Sprintf(convContentNameFormat, uniquePart())
 	contentWriter, err := content.OpenWriter(ctx, cs, content.WithRef(refName))
 	if err != nil {
@@ -337,22 +320,84 @@ func (loader *contentLoader) Load(ctx context.Context, cs content.Store) (l laye
 			Digest:    digester.Digest(),
 			Size:      countWriter.c,
 			Annotations: map[string]string{
-				annoOverlayBDBlobDigest: digester.Digest().String(),
-				annoOverlayBDBlobSize:   fmt.Sprintf("%d", countWriter.c),
+				labelOverlayBDBlobDigest: digester.Digest().String(),
+				labelOverlayBDBlobSize:   fmt.Sprintf("%d", countWriter.c),
 			},
 		},
 		diffID: digester.Digest(),
 	}
 	if loader.isAccelLayer {
-		l.desc.Annotations[annoKeyAccelerationLayer] = "yes"
+		l.desc.Annotations[labelKeyAccelerationLayer] = "yes"
 	}
 	if loader.fsType != "" {
-		l.desc.Annotations[annoOverlayBDBlobFsType] = loader.fsType
+		l.desc.Annotations[labelOverlayBDBlobFsType] = loader.fsType
 	}
 	return l, nil
 }
 
-func commitOverlaybdImage(ctx context.Context, cs content.Store, srcManifest ocispec.Manifest, committedLayers []layer) (_ ocispec.Descriptor, err0 error) {
+type overlaybdConvertor struct {
+	ImageConvertor
+	cs      content.Store
+	sn      snapshots.Snapshotter
+	remote  bool
+	fetcher remotes.Fetcher
+	pusher  remotes.Pusher
+	db      *sql.DB
+	host    string
+	repo    string
+}
+
+func NewOverlaybdConvertor(ctx context.Context, cs content.Store, sn snapshots.Snapshotter, resolver remotes.Resolver, ref string, dbstr string) (ImageConvertor, error) {
+	c := &overlaybdConvertor{
+		cs:     cs,
+		sn:     sn,
+		remote: false,
+	}
+	var err error
+	if dbstr != "" {
+		c.remote = true
+		c.db, err = sql.Open("mysql", dbstr)
+		if err != nil {
+			return nil, err
+		}
+		c.pusher, err = resolver.Pusher(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		c.fetcher, err = resolver.Fetcher(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		refspec, err := reference.Parse(ref)
+		if err != nil {
+			return nil, err
+		}
+		c.host = refspec.Hostname()
+		c.repo = strings.TrimPrefix(refspec.Locator, c.host+"/")
+	}
+	return c, nil
+}
+
+func (c *overlaybdConvertor) Convert(ctx context.Context, srcManifest ocispec.Manifest, fsType string) (ocispec.Descriptor, error) {
+	configData, err := content.ReadBlob(ctx, c.cs, srcManifest.Config)
+	if err != nil {
+		return emptyDesc, err
+	}
+
+	var srcCfg ocispec.Image
+	if err := json.Unmarshal(configData, &srcCfg); err != nil {
+		return emptyDesc, err
+	}
+
+	committedLayers, err := c.convertLayers(ctx, srcManifest.Layers, srcCfg.RootFS.DiffIDs, fsType)
+	if err != nil {
+		return emptyDesc, err
+	}
+
+	return c.commitImage(ctx, srcManifest, srcCfg, committedLayers)
+}
+
+func (c *overlaybdConvertor) commitImage(ctx context.Context, srcManifest ocispec.Manifest, imgCfg ocispec.Image, committedLayers []layer) (ocispec.Descriptor, error) {
 	var copyManifest = struct {
 		ocispec.Manifest `json:",omitempty"`
 		// MediaType is the media type of the object this schema refers to.
@@ -362,44 +407,15 @@ func commitOverlaybdImage(ctx context.Context, cs content.Store, srcManifest oci
 		MediaType: images.MediaTypeDockerSchema2Manifest,
 	}
 
-	// new image config
-	configData, err := content.ReadBlob(ctx, cs, copyManifest.Manifest.Config)
-	if err != nil {
-		return emptyDesc, err
-	}
-
-	var imgCfg ocispec.Image
-	if err := json.Unmarshal(configData, &imgCfg); err != nil {
-		return emptyDesc, err
-	}
-
-	srcHistory := imgCfg.History
-
-	imgCfg.History = nil
 	imgCfg.RootFS.DiffIDs = nil
 	copyManifest.Layers = nil
 
-	buildTime := time.Now()
-	for idx, l := range committedLayers {
+	for _, l := range committedLayers {
 		copyManifest.Layers = append(copyManifest.Layers, l.desc)
 		imgCfg.RootFS.DiffIDs = append(imgCfg.RootFS.DiffIDs, l.diffID)
-
-		createdBy := "/bin/sh -c #(nop)  init overlaybd base layer"
-		if idx != 0 {
-			createdBy = srcHistory[idx-1].CreatedBy
-		}
-
-		imgCfg.History = append(imgCfg.History, ocispec.History{
-			Created:   &buildTime,
-			CreatedBy: createdBy,
-		})
 	}
 
-	for i, j := 0, len(imgCfg.History)-1; i < j; i, j = i+1, j-1 {
-		imgCfg.History[i], imgCfg.History[j] = imgCfg.History[j], imgCfg.History[i]
-	}
-
-	configData, err = json.MarshalIndent(imgCfg, "", "   ")
+	configData, err := json.MarshalIndent(imgCfg, "", "   ")
 	if err != nil {
 		return emptyDesc, errors.Wrap(err, "failed to marshal image")
 	}
@@ -411,8 +427,14 @@ func commitOverlaybdImage(ctx context.Context, cs content.Store, srcManifest oci
 	}
 
 	ref := remotes.MakeRefKey(ctx, config)
-	if err := content.WriteBlob(ctx, cs, ref, bytes.NewReader(configData), config); err != nil {
+	if err := content.WriteBlob(ctx, c.cs, ref, bytes.NewReader(configData), config); err != nil {
 		return ocispec.Descriptor{}, errors.Wrap(err, "failed to write image config")
+	}
+	if c.remote {
+		if err := c.pushObject(ctx, config); err != nil {
+			return ocispec.Descriptor{}, errors.Wrap(err, "failed to push image config")
+		}
+		log.G(ctx).Infof("config pushed")
 	}
 
 	copyManifest.Manifest.Config = config
@@ -434,57 +456,139 @@ func commitOverlaybdImage(ctx context.Context, cs content.Store, srcManifest oci
 	}
 
 	ref = remotes.MakeRefKey(ctx, desc)
-	if err := content.WriteBlob(ctx, cs, ref, bytes.NewReader(mb), desc, content.WithLabels(labels)); err != nil {
+	if err := content.WriteBlob(ctx, c.cs, ref, bytes.NewReader(mb), desc, content.WithLabels(labels)); err != nil {
 		return emptyDesc, errors.Wrap(err, "failed to write image manifest")
+	}
+	if c.remote {
+		if err := c.pushObject(ctx, desc); err != nil {
+			return ocispec.Descriptor{}, errors.Wrap(err, "failed to push image manifest")
+		}
+		log.G(ctx).Infof("image pushed")
 	}
 	return desc, nil
 }
 
-// convOCIV1LayersToZfile applys image layers based on the overlaybd baselayer and
-// exports the layers based on zfile.
-//
-// NOTE: The first element of descs will be overlaybd baselayer.
-func convOCIV1LayersToZfile(ctx context.Context, sn snapshots.Snapshotter, cs content.Store, baseLayer *layer, srcDescs []ocispec.Descriptor, fsType string, basePath string) ([]layer, error) {
-	var (
-		lastParentID string
-		err          error
-	)
-	// init base layer
-	if baseLayer != nil {
-		lastParentID, err = applyOCIV1LayerInZfile(ctx, sn, cs, "", baseLayer.desc, nil, func(root string) error {
-			f, err := ioutil.ReadDir(root)
-			if err != nil {
-				return err
-			}
+type OverlaybdLayer struct {
+	Host       string
+	Repo       string
+	ChainID    string
+	DataDigest string
+	DataSize   int64
+}
 
-			if len(f) != 1 || f[0].IsDir() {
-				return errors.Errorf("unexpected base layer tar[.gz]")
-			}
-			return os.Rename(filepath.Join(root, f[0].Name()), filepath.Join(root, "overlaybd.commit"))
-		})
-		if err != nil {
-			return nil, err
+func (c *overlaybdConvertor) findRemote(ctx context.Context, chainID string) (ocispec.Descriptor, error) {
+	row := c.db.QueryRow("select host, repo, chain_id, data_digest, data_size from overlaybd_layers where host=? and repo=? and chain_id=?", c.host, c.repo, chainID)
+	// try to find in the same repo, check existence on registry
+	var layer OverlaybdLayer
+	if err := row.Scan(&layer.Host, &layer.Repo, &layer.ChainID, &layer.DataDigest, &layer.DataSize); err == nil {
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayer,
+			Digest:    digest.Digest(layer.DataDigest),
+			Size:      layer.DataSize,
 		}
-	} else {
-		lastParentID, err = buildBaseLayerInZfile(ctx, sn, fsType, basePath)
-		if err != nil {
-			return nil, err
+		rc, err := c.fetcher.Fetch(ctx, desc)
+		if err == nil {
+			rc.Close()
+			log.G(ctx).Infof("found remote layer for chainID %s", chainID)
+			return desc, nil
+		}
+		if errdefs.IsNotFound(err) {
+			// invalid record in db, which is not found in registry, remove it
+			_, err := c.db.Exec("delete from overlaybd_layers where host=? and repo=? and chain_id=?", c.host, c.repo, chainID)
+			if err != nil {
+				return emptyDesc, errors.Wrapf(err, "failed to remove invalid record in db")
+			}
 		}
 	}
 
-	var (
-		commitLayers = make([]layer, len(srcDescs)+1)
-
-		opts = []snapshots.Opt{
-			snapshots.WithLabels(map[string]string{
-				"containerd.io/snapshot/overlaybd.writable":     "dir",
-				"containerd.io/snapshot/overlaybd/blob-fs-type": fsType,
-			}),
+	// found record in other repo, mount it to target repo
+	rows, err := c.db.Query("select host, repo, chain_id, data_digest, data_size from overlaybd_layers where host=? and chain_id=?", c.host, chainID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return emptyDesc, errdefs.ErrNotFound
 		}
+		log.G(ctx).Infof("query error %v", err)
+		return emptyDesc, err
+	}
+	for rows.Next() {
+		var layer OverlaybdLayer
+		err = rows.Scan(&layer.Host, &layer.Repo, &layer.ChainID, &layer.DataDigest, &layer.DataSize)
+		if err != nil {
+			continue
+		}
+		// try mount
+		desc := ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageLayer,
+			Digest:    digest.Digest(layer.DataDigest),
+			Size:      layer.DataSize,
+			Annotations: map[string]string{
+				fmt.Sprintf("%s.%s", labelDistributionSource, c.host): layer.Repo,
+			},
+		}
+		_, err := c.pusher.Push(ctx, desc)
+		if errdefs.IsAlreadyExists(err) {
+			desc.Annotations = nil
+			_, err := c.db.Exec("insert into overlaybd_layers(host, repo, chain_id, data_digest, data_size) values(?, ?, ?, ?, ?)", c.host, c.repo, chainID, desc.Digest.String(), desc.Size)
+			if err != nil {
+				continue
+			}
+			log.G(ctx).Infof("mount from %s success", layer.Repo)
+			log.G(ctx).Infof("found remote layer for chainID %s", chainID)
+			return desc, nil
+		}
+	}
+	log.G(ctx).Infof("layer not found in remote")
+	return emptyDesc, errdefs.ErrNotFound
+}
+
+func (c *overlaybdConvertor) pushObject(ctx context.Context, desc ocispec.Descriptor) error {
+	ra, err := c.cs.ReaderAt(ctx, desc)
+	if err != nil {
+		return err
+	}
+	defer ra.Close()
+
+	cw, err := c.pusher.Push(ctx, desc)
+	if err != nil {
+		if errdefs.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	return content.Copy(ctx, cw, content.NewReader(ra), desc.Size, desc.Digest)
+}
+
+func (c *overlaybdConvertor) sentToRemote(ctx context.Context, desc ocispec.Descriptor, chainID string) error {
+	// upload to registry
+	err := c.pushObject(ctx, desc)
+	if err != nil {
+		return err
+	}
+	// update db
+	_, err = c.db.Exec("insert into overlaybd_layers(host, repo, chain_id, data_digest, data_size) values(?, ?, ?, ?, ?)", c.host, c.repo, chainID, desc.Digest.String(), desc.Size)
+	if err != nil {
+		log.G(ctx).Warnf("failed to insert to db, err: %v", err)
+		if strings.Contains(err.Error(), "Duplicate entry") {
+			fmt.Printf("Conflict when inserting into db, maybe other process is converting the same blob, please try again later\n")
+		}
+		return err
+	}
+	return nil
+}
+
+// convertLayers applys image layers on overlaybd with specified filesystem and
+// exports the layers based on zfile.
+//
+func (c *overlaybdConvertor) convertLayers(ctx context.Context, srcDescs []ocispec.Descriptor, srcDiffIDs []digest.Digest, fsType string) ([]layer, error) {
+	var (
+		lastParentID string = ""
+		err          error
+		commitLayers = make([]layer, len(srcDescs))
+		chain        []digest.Digest
 	)
 
 	var sendToContentStore = func(ctx context.Context, snID string) (layer, error) {
-		info, err := sn.Stat(ctx, snID)
+		info, err := c.sn.Stat(ctx, snID)
 		if err != nil {
 			return emptyLayer, err
 		}
@@ -492,28 +596,90 @@ func convOCIV1LayersToZfile(ctx context.Context, sn snapshots.Snapshotter, cs co
 		loader := newContentLoaderWithFsType(false, fsType, contentFile{
 			info.Labels["containerd.io/snapshot/overlaybd.localcommitpath"],
 			"overlaybd.commit"})
-		return loader.Load(ctx, cs)
-	}
-
-	commitLayers[0], err = sendToContentStore(ctx, lastParentID)
-	if err != nil {
-		return nil, err
+		return loader.Load(ctx, c.cs)
 	}
 
 	eg, ctx := errgroup.WithContext(ctx)
 	for idx, desc := range srcDescs {
-		lastParentID, err = applyOCIV1LayerInZfile(ctx, sn, cs, lastParentID, desc, opts, nil)
+		chain = append(chain, srcDiffIDs[idx])
+		chainID := identity.ChainID(chain).String()
+
+		var remoteDesc ocispec.Descriptor
+
+		if c.remote {
+			remoteDesc, err = c.findRemote(ctx, chainID)
+			if err != nil {
+				if !errdefs.IsNotFound(err) {
+					return nil, err
+				}
+			}
+		}
+
+		if c.remote && err == nil {
+			key := fmt.Sprintf(convSnapshotNameFormat, chainID)
+			opts := []snapshots.Opt{
+				snapshots.WithLabels(map[string]string{
+					"containerd.io/snapshot.ref":       key,
+					"containerd.io/snapshot/image-ref": c.host + "/" + c.repo,
+					labelOverlayBDBlobDigest:           remoteDesc.Digest.String(),
+					labelOverlayBDBlobSize:             fmt.Sprintf("%d", remoteDesc.Size),
+				}),
+			}
+			_, err = c.sn.Prepare(ctx, "prepare-"+key, lastParentID, opts...)
+			if !errdefs.IsAlreadyExists(err) {
+				// failed to prepare remote snapshot
+				if err == nil {
+					//rollback
+					c.sn.Remove(ctx, "prepare-"+key)
+				}
+				return nil, errors.Wrapf(err, "failed to prepare remote snapshot")
+			}
+			lastParentID = key
+			commitLayers[idx] = layer{
+				desc: ocispec.Descriptor{
+					MediaType: ocispec.MediaTypeImageLayer,
+					Digest:    remoteDesc.Digest,
+					Size:      remoteDesc.Size,
+					Annotations: map[string]string{
+						labelOverlayBDBlobDigest: remoteDesc.Digest.String(),
+						labelOverlayBDBlobSize:   fmt.Sprintf("%d", remoteDesc.Size),
+					},
+				},
+				diffID: remoteDesc.Digest,
+			}
+			continue
+		}
+
+		opts := []snapshots.Opt{
+			snapshots.WithLabels(map[string]string{
+				labelOverlayBDBlobWritable: "dir",
+				labelOverlayBDBlobFsType:   fsType,
+			}),
+		}
+		lastParentID, err = c.applyOCIV1LayerInZfile(ctx, lastParentID, desc, opts, nil)
 		if err != nil {
 			return nil, err
 		}
 
-		idxI := idx + 1
-		snID := lastParentID
-		eg.Go(func() error {
-			var err error
-			commitLayers[idxI], err = sendToContentStore(ctx, snID)
-			return err
-		})
+		if c.remote {
+			// must synchronize registry and db, can not do concurrently
+			commitLayers[idx], err = sendToContentStore(ctx, lastParentID)
+			if err != nil {
+				return nil, err
+			}
+			err = c.sentToRemote(ctx, commitLayers[idx].desc, chainID)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			idxI := idx
+			snID := lastParentID
+			eg.Go(func() error {
+				var err error
+				commitLayers[idxI], err = sendToContentStore(ctx, snID)
+				return err
+			})
+		}
 	}
 
 	if err := eg.Wait(); err != nil {
@@ -523,16 +689,15 @@ func convOCIV1LayersToZfile(ctx context.Context, sn snapshots.Snapshotter, cs co
 }
 
 // applyOCIV1LayerInZfile applys the OCIv1 tarfile in zfile format and commit it.
-func applyOCIV1LayerInZfile(
+func (c *overlaybdConvertor) applyOCIV1LayerInZfile(
 	ctx context.Context,
-	sn snapshots.Snapshotter, cs content.Store,
 	parentID string, // the ID of parent snapshot
 	desc ocispec.Descriptor, // the descriptor of layer
 	snOpts []snapshots.Opt, // apply for the commit snapshotter
 	afterApply func(root string) error, // do something after apply tar stream
 ) (string, error) {
 
-	ra, err := cs.ReaderAt(ctx, desc)
+	ra, err := c.cs.ReaderAt(ctx, desc)
 	if err != nil {
 		return emptyString, errors.Wrapf(err, "failed to get reader %s from content store", desc.Digest)
 	}
@@ -545,7 +710,7 @@ func applyOCIV1LayerInZfile(
 
 	for {
 		key = fmt.Sprintf(convSnapshotNameFormat, uniquePart())
-		mounts, err = sn.Prepare(ctx, key, parentID, snOpts...)
+		mounts, err = c.sn.Prepare(ctx, key, parentID, snOpts...)
 		if err != nil {
 			// retry other key
 			if errdefs.IsAlreadyExists(err) {
@@ -565,7 +730,7 @@ func applyOCIV1LayerInZfile(
 
 	defer func() {
 		if rollback {
-			if rerr := sn.Remove(ctx, key); rerr != nil {
+			if rerr := c.sn.Remove(ctx, key); rerr != nil {
 				log.G(ctx).WithError(rerr).WithField("key", key).Warnf("apply failure and failed to cleanup snapshot")
 			}
 		}
@@ -592,54 +757,13 @@ func applyOCIV1LayerInZfile(
 	}
 
 	commitID := fmt.Sprintf(convSnapshotNameFormat, digester.Digest())
-	if err = sn.Commit(ctx, commitID, key); err != nil {
+	if err = c.sn.Commit(ctx, commitID, key); err != nil {
 		if !errdefs.IsAlreadyExists(err) {
 			return emptyString, err
 		}
 	}
 
 	rollback = err != nil
-	return commitID, nil
-}
-
-func buildBaseLayerInZfile(ctx context.Context, sn snapshots.Snapshotter, fsType string, basePath string) (_ string, retErr error) {
-	var (
-		key string
-
-		snOpts = []snapshots.Opt{
-			snapshots.WithLabels(map[string]string{
-				"containerd.io/snapshot/overlaybd.writable":     "dir",
-				"containerd.io/snapshot/overlaybd/blob-fs-type": fsType,
-				"containerd.io/snapshot/overlaybd.baselayer":    "baselayer",
-			}),
-		}
-	)
-
-	for {
-		key = fmt.Sprintf(convSnapshotNameFormat, uniquePart())
-		if _, err := sn.Prepare(ctx, key, "", snOpts...); err != nil {
-			if errdefs.IsAlreadyExists(err) {
-				continue
-			}
-			return emptyString, errors.Wrapf(err, "failed to preprare snapshot %q", key)
-		}
-		break
-	}
-
-	defer func() {
-		if retErr != nil {
-			if rerr := sn.Remove(ctx, key); rerr != nil {
-				log.G(ctx).WithError(rerr).WithField("key", key).Warnf("apply failure and failed to cleanup snapshot")
-			}
-		}
-	}()
-
-	commitID := fmt.Sprintf(convSnapshotNameFormat, uniquePart())
-	if err := sn.Commit(ctx, commitID, key); err != nil {
-		if !errdefs.IsAlreadyExists(err) {
-			return emptyString, err
-		}
-	}
 	return commitID, nil
 }
 
