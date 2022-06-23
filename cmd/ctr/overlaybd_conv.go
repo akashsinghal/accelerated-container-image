@@ -131,11 +131,11 @@ var convertCommand = cli.Command{
 			Usage:  "allow connections to SSL registry without certs",
 			Hidden: false,
 		},
-		cli.BoolFlag{
-			Name:   "plain-http",
-			Usage:  "use plain http and not https when pushing to registry",
-			Hidden: false,
-		},
+		// cli.BoolFlag{
+		// 	Name:   "plain-http",
+		// 	Usage:  "use plain http and not https when pushing to registry",
+		// 	Hidden: false,
+		// },
 		cli.StringSliceFlag{
 			Name:  "config",
 			Usage: "auth config path",
@@ -150,7 +150,7 @@ var convertCommand = cli.Command{
 
 		username = context.String("username")
 		password = context.String("password")
-		plainHTTP = context.Bool("plain-http")
+		plainHTTP = false
 		insecure = context.Bool("insecure")
 		configs = context.StringSlice("config")
 
@@ -844,7 +844,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	}
 	manifestDescriptor := ocispec.Descriptor{
 		MediaType: artifactspec.MediaTypeArtifactManifest,
-		Digest:    digest.Canonical.FromBytes(manifestBytes),
+		Digest:    digest.FromBytes(manifestBytes),
 		Size:      int64(len(manifestBytes)),
 	}
 	fmt.Println(manifestDescriptor)
@@ -853,19 +853,27 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 
 	// store artifact manifest in content store
 	refName := remotes.MakeRefKey(ctx, manifestDescriptor)
-	labels := map[string]string{}
-	labels["artifact"] = string(manifestDescriptor.Digest)
-	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
-	fmt.Println(cs.Info(ctx, manifestDescriptor.Digest))
+
+	// create the oras oci store
+	artifactStore, err := ocitarget.New("/home/akashsinghal/accelerated-container-image/oras-test")
 	if err != nil {
 		return err
 	}
 
-	// push the artifact to registry
-	artifactStore, err := ocitarget.New("/var/lib/containerd/io.containerd.content.v1.content")
+	// push the artifact manifest blob to oci store
+	err = artifactStore.Push(ctx, manifestDescriptor, bytes.NewReader(manifestBytes))
 	if err != nil {
 		return err
 	}
+
+	// verify manifest blob has been pushed properly (will remove later)
+	exists, err := artifactStore.Exists(ctx, manifestDescriptor)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exists status: %v", exists)
+
+	// tag the manifest with a ref
 	err = artifactStore.Tag(ctx, manifestDescriptor, refName)
 	if err != nil {
 		return err
@@ -899,7 +907,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	repository.Client = repoClient
 
 	// Copy the artifact manifest to remote Repository
-	retDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactDest)
+	retDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactDest, oras.DefaultCopyOptions)
 	if err != nil {
 		return err
 	}
