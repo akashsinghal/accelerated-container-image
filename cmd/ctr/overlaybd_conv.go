@@ -73,6 +73,7 @@ const (
 	labelKeyAccelerationLayer  = "containerd.io/snapshot/overlaybd/acceleration-layer"
 	labelBuildLayerFrom        = "containerd.io/snapshot/overlaybd/build.layer-from"
 	labelDistributionSource    = "containerd.io/distribution.source"
+	contentStoreRootPath       = "/var/lib/containerd/io.containerd.content.v1.content"
 )
 
 var (
@@ -131,11 +132,6 @@ var convertCommand = cli.Command{
 			Usage:  "allow connections to SSL registry without certs",
 			Hidden: false,
 		},
-		// cli.BoolFlag{
-		// 	Name:   "plain-http",
-		// 	Usage:  "use plain http and not https when pushing to registry",
-		// 	Hidden: false,
-		// },
 		cli.StringSliceFlag{
 			Name:  "config",
 			Usage: "auth config path",
@@ -150,7 +146,7 @@ var convertCommand = cli.Command{
 
 		username = context.String("username")
 		password = context.String("password")
-		plainHTTP = false
+		plainHTTP = context.Bool("plain-http")
 		insecure = context.Bool("insecure")
 		configs = context.StringSlice("config")
 
@@ -847,31 +843,26 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 		Digest:    digest.FromBytes(manifestBytes),
 		Size:      int64(len(manifestBytes)),
 	}
-	fmt.Println(manifestDescriptor)
-	fmt.Println(manifestDescriptor.Digest)
-	fmt.Println(artifactManifest)
 
-	// store artifact manifest in content store
 	refName := remotes.MakeRefKey(ctx, manifestDescriptor)
 
 	// create the oras oci store
-	artifactStore, err := ocitarget.New("/home/akashsinghal/accelerated-container-image/oras-test")
+	artifactStore, err := ocitarget.New(contentStoreRootPath)
 	if err != nil {
 		return err
 	}
 
-	// push the artifact manifest blob to oci store
-	err = artifactStore.Push(ctx, manifestDescriptor, bytes.NewReader(manifestBytes))
+	// store artifact manifest in content store
+	// add garbage collection reference labels so blobs are not deleted
+	labels := map[string]string{}
+	labels["containerd.io/gc.root"] = string(manifestDescriptor.Digest)
+	for i, ch := range obdManifest.Layers {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = ch.Digest.String()
+	}
+	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
 	if err != nil {
 		return err
 	}
-
-	// verify manifest blob has been pushed properly (will remove later)
-	exists, err := artifactStore.Exists(ctx, manifestDescriptor)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("exists status: %v", exists)
 
 	// tag the manifest with a ref
 	err = artifactStore.Tag(ctx, manifestDescriptor, refName)
@@ -887,7 +878,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	// Set the Repository Client Credentials
 	repoClient := &orasauth.Client{
 		Header: http.Header{
-			"User-Agent": {"oras-go"},
+			"User-Agent": {"overlaybd"},
 		},
 		Cache:      orasauth.DefaultCache,
 		Credential: credentialProvider,
@@ -903,7 +894,6 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	}
 	// Set the PlainHTTP to true if specified
 	repository.PlainHTTP = plainHTTP
-
 	repository.Client = repoClient
 
 	// Copy the artifact manifest to remote Repository
