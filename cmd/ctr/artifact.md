@@ -1,24 +1,24 @@
-# OCI Artifact Conversion and Push
+# ORAS Artifact Conversion and Push
 
 Github [link](https://github.com/akashsinghal/accelerated-container-image)
 
-Currently, the DADI image that is produced after converting the original image using OverlayBD, is OCI spec compliant; However, using OCI Artifacts, the DADI image can be referenced by the original image.
-There are a few primary motivations for using OCI Artifact:
+Currently, the DADI image that is produced after converting the original image using OverlayBD, is OCI spec compliant; However, using ORAS Artifacts, the DADI image can be referenced by the original image.
+There are a few primary motivations for using ORAS Artifact:
 1. The DADI Image's lifespan is directly attached to the original image it is derived from 
 2. The DADI Image is easily discoverable using only the original image. See [ORAS discover](https://oras.land/cli/6_reference_types/#discovering-artifact-references)
     1. For consumers, this allows for more transparent lookup of DADI image and its contents
     2. For providers, this allows for a less invasive method for running accelerated images since the image to run at runtime is determined by the existence of an attached DADI Image artifact
 
-## Proposed DADI conversion Process:
+## DADI conversion Process:
 
-The current `obdconv` command for the custom `ctr` cli will be changed to add a `--push-artifact`. For registry authentication, the `--username` and `--password` can be provided OR the `--config` can be filled with the auth config file path. By default if no username/password or auth file is provided, the docker config will be used.
+The current `obdconv` command for the custom `ctr` cli will be changed to add a `--push-artifact`. For registry authentication, the `--username` and `--password` can be provided OR the `--auth-config` can be filled with the auth config file path. By default if no username/password or auth file is provided, the docker config will be used.
 
 ```
-sudo bin/ctr obdconv --push-artifact --username <TARGET-REGISTRY-USERNAME> --password <TARGET-REGISTRY-PASSWORD> artifactstest.azurecr.io/teleport/redis:original artifactstest.azurecr.io/teleport/redis:oras
+sudo bin/ctr obdconv --push-artifact --username <TARGET-REGISTRY-USERNAME> --password <TARGET-REGISTRY-PASSWORD> localhost:5000/dadi/redis:original localhost:5000/dadi/redis:oras
 ``` 
 
 Assumptions:
-- The referred image in the artifact manifest is the source image provided
+- The subject image in the artifact manifest is the source image provided
 - The specifed target image parameter specifies the artifact name and registry to push to
 
 New Conversion Flow:
@@ -32,7 +32,7 @@ New Conversion Flow:
 
 ## New Dependencies
 
-- ORAS Go Module: github.com/deislabs/oras v0.2.1-alpha.1
+- ORAS Go Module: github.com/deislabs/oras v2.0.0-alpha
 - ORAS containerd: github.com/oras-project/containerd/api
 - ORAS Artifact Spec: github.com/oras-project/artifacts-spec
 
@@ -40,20 +40,20 @@ New Conversion Flow:
 
 `obdconv` exection now takes ~ 16.62 seconds to complete for a redis image
 
-## Converting from DADI OCI Image to DADI OCI Artifact
+## Converting from DADI OCI Image to DADI ORAS Artifact
 
 The contents of the artifact are the same as the original image. The only difference is the manifest. 
 
 The `artifactType` field is an artifact specific field that can be used to specify artifact specs. Here we use `dadi.image.v1` as the artifact to distinguish the spec.
 
-The `blob` field is equivalent to the `layers` field. In order to add the config field to the artifact, the standard convention for DADI image artifact is to add the config blob as the first blob in the list.
+The `blobs` field is equivalent to the `layers` field. In order to add the config field to the artifact, the standard convention for DADI image artifact is to add the config blob as the first blob in the list.
 
 The `mediaType` must be `application/vnd.cncf.oras.artifact.manifest.v1+json`
 
 the `subject` contains a reference to the original image manifest
 
 
-### DADI Image Manifest -> DADI OCI Artifact Manifest
+### DADI Image Manifest -> DADI ORAS Artifact Manifest
 
 Here's the manifest lifecycle of the redis image:
 
@@ -187,7 +187,7 @@ DADI OCI Image Manifest
 }
 ```
 
-DADI OCI Artifact Manifest
+DADI ORAS Artifact Manifest
 ```
 {
   "mediaType": "application/vnd.cncf.oras.artifact.manifest.v1+json",
