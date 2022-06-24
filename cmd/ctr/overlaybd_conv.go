@@ -856,6 +856,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	// add garbage collection reference labels so blobs are not deleted
 	labels := map[string]string{}
 	labels["containerd.io/gc.root"] = string(manifestDescriptor.Digest)
+	labels["containerd.io/gc.ref.content.config"] = obdManifest.Config.Digest.String()
 	for i, ch := range obdManifest.Layers {
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = ch.Digest.String()
 	}
