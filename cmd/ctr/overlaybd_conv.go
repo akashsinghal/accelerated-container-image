@@ -48,7 +48,8 @@ import (
 	"github.com/containerd/containerd/reference"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/sirupsen/logrus"
+	"github.com/docker/cli/cli/config"
+	"github.com/docker/cli/cli/config/configfile"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/opencontainers/go-digest"
@@ -77,14 +78,14 @@ const (
 )
 
 var (
-	emptyString string
-	emptyDesc   ocispec.Descriptor
-	emptyLayer  layer
-	password    string
-	username    string
-	plainHTTP   bool
-	insecure    bool
-	configs     []string
+	emptyString    string
+	emptyDesc      ocispec.Descriptor
+	emptyLayer     layer
+	password       string
+	username       string
+	plainHTTP      bool
+	insecure       bool
+	authConfigPath string
 
 	artifactTypeName       = "dadi.image.v1"
 	convSnapshotNameFormat = "overlaybd-conv-%s"
@@ -132,13 +133,13 @@ var convertCommand = cli.Command{
 			Usage:  "allow connections to SSL registry without certs",
 			Hidden: false,
 		},
-		cli.StringSliceFlag{
-			Name:  "config",
+		cli.StringFlag{
+			Name:  "auth-config",
 			Usage: "auth config path",
+			Value: "",
 		},
 	),
 	Action: func(context *cli.Context) error {
-		logrus.SetLevel(logrus.DebugLevel)
 		var (
 			srcImage    = context.Args().First()
 			targetImage = context.Args().Get(1)
@@ -148,7 +149,7 @@ var convertCommand = cli.Command{
 		password = context.String("password")
 		plainHTTP = context.Bool("plain-http")
 		insecure = context.Bool("insecure")
-		configs = context.StringSlice("config")
+		authConfigPath = context.String("auth-config")
 
 		if srcImage == "" || targetImage == "" {
 			return errors.New("please provide src image name(must in local) and dest image name")
@@ -809,7 +810,7 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 	return
 }
 
-func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactDest string, is images.Store) error {
+func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactTarget string, is images.Store) error {
 	// create artifact
 	var blobDesc []artifactspec.Descriptor
 	for _, layer := range obdManifest.Layers {
@@ -871,40 +872,43 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 		return err
 	}
 
-	// Create Repository Target
-	repository, err := registry.NewRepository(artifactDest)
+	// create Repository Target
+	repository, err := registry.NewRepository(artifactTarget)
 	if err != nil {
 		return err
 	}
-	// Set the Repository Client Credentials
-	repoClient := &orasauth.Client{
+
+	// set the Repository Client Credentials
+	repositoryClient := &orasauth.Client{
 		Header: http.Header{
 			"User-Agent": {"overlaybd"},
 		},
 		Cache:      orasauth.DefaultCache,
 		Credential: credentialProvider,
 	}
-	// Set the TSLClientConfig for HTTP client if insecure set to true
+
+	// set the TSLClientConfig for HTTP client if insecure set to true
 	if insecure {
-		repoClient.Client = http.DefaultClient
-		repoClient.Client.Transport = &http.Transport{
+		repositoryClient.Client = http.DefaultClient
+		repositoryClient.Client.Transport = &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true,
 			},
 		}
 	}
-	// Set the PlainHTTP to true if specified
-	repository.PlainHTTP = plainHTTP
-	repository.Client = repoClient
 
-	// Copy the artifact manifest to remote Repository
-	retDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactDest, oras.DefaultCopyOptions)
+	// set the PlainHTTP to true if specified
+	repository.PlainHTTP = plainHTTP
+	repository.Client = repositoryClient
+
+	// copy the artifact manifest to remote Repository
+	returnedManifestDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactTarget, oras.DefaultCopyOptions)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("Pushed", artifactDest)
-	fmt.Println("Digest:", retDesc.Digest)
+	fmt.Println("Pushed", artifactTarget)
+	fmt.Println("Digest:", returnedManifestDesc.Digest)
 	return nil
 }
 
@@ -916,6 +920,40 @@ func credentialProvider(ctx context.Context, registry string) (orasauth.Credenti
 		}, nil
 	}
 
-	//TODO: handle dockerconfig
+	// use docker config file to extract registry credentials
+	var cfg *configfile.ConfigFile
+	if authConfigPath != "" {
+		cfg = configfile.New(authConfigPath)
+		if _, err := os.Stat(authConfigPath); err == nil {
+			file, err := os.Open(authConfigPath)
+			if err != nil {
+				return orasauth.EmptyCredential, err
+			}
+			defer file.Close()
+			if err := cfg.LoadFromReader(file); err != nil {
+				return orasauth.EmptyCredential, err
+			}
+		} else {
+			return orasauth.EmptyCredential, err
+		}
+	} else {
+		// attempt to use docker config at default path
+		var err error
+		cfg, err = config.Load(config.Dir())
+		if err != nil {
+			return orasauth.EmptyCredential, nil
+		}
+	}
+
+	dockerAuthConfig := cfg.AuthConfigs[registry]
+	username = dockerAuthConfig.Username
+	password = dockerAuthConfig.Password
+	if username != "" || password != "" {
+		return orasauth.Credential{
+			Username: username,
+			Password: password,
+		}, nil
+	}
+
 	return orasauth.EmptyCredential, nil
 }
