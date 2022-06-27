@@ -813,6 +813,16 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactTarget string, is images.Store) error {
 	// create artifact
 	var blobDesc []artifactspec.Descriptor
+
+	// append the config as the first blob
+	obdManifestConfig := obdManifest.Config
+	blobDesc = append(blobDesc, artifactspec.Descriptor{
+		MediaType:   obdManifestConfig.MediaType,
+		Digest:      obdManifestConfig.Digest,
+		Size:        obdManifestConfig.Size,
+		URLs:        obdManifestConfig.URLs,
+		Annotations: obdManifestConfig.Annotations,
+	})
 	for _, layer := range obdManifest.Layers {
 		blobDesc = append(blobDesc, artifactspec.Descriptor{
 			MediaType:   layer.MediaType,
@@ -857,7 +867,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	// add garbage collection reference labels so blobs are not deleted
 	labels := map[string]string{}
 	labels["containerd.io/gc.root"] = string(manifestDescriptor.Digest)
-	labels["containerd.io/gc.ref.content.config"] = obdManifest.Config.Digest.String()
+	labels["containerd.io/gc.ref.content.config"] = obdManifestConfig.Digest.String()
 	for i, ch := range obdManifest.Layers {
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = ch.Digest.String()
 	}
