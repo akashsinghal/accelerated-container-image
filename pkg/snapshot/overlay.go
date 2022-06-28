@@ -298,7 +298,7 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, e
 	return usage, nil
 }
 
-func (o *snapshotter) getWritableType(ctx context.Context, info snapshots.Info) (mode int) {
+func (o *snapshotter) getWritableType(ctx context.Context, id string, info snapshots.Info) (mode int) {
 	defer func() {
 		log.G(ctx).Infof("snapshot R/W label: %d", mode)
 	}()
@@ -307,15 +307,26 @@ func (o *snapshotter) getWritableType(ctx context.Context, info snapshots.Info) 
 	if !ok {
 		return
 	}
-	if m == "dir" {
-		mode = rwDir
+	rwMode := func() int {
+		if m == "dir" {
+			return rwDir
+		}
+		if m == "dev" {
+			return rwDev
+		}
+		return roDir
+	}
+	if id == "" {
+		// 'id' shouldn't be empty unless building initial layer.
+		log.G(ctx).Debugf("empty snID get. It should be an initial layer.")
+		return rwMode()
+	}
+	// check image type (ociv1 or overlaybd)
+	if _, err := o.loadBackingStoreConfig(id); err != nil {
+		log.G(ctx).Debugf("[%s] is not an overlaybd image.", id)
 		return
 	}
-	if m == "dev" {
-		mode = rwDev
-		return
-	}
-	return
+	return rwMode()
 }
 
 func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind, key string, parent string, opts ...snapshots.Opt) (_ []mount.Mount, retErr error) {
@@ -414,7 +425,7 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 	}
 
 	stype := storageTypeNormal
-	writeType := o.getWritableType(ctx, info)
+	writeType := o.getWritableType(ctx, parentID, info)
 	// If Preparing for rootfs, find metadata from its parent (top layer), launch and mount backstore device.
 	if _, ok := info.Labels[labelKeyTargetSnapshotRef]; !ok {
 		if writeType != roDir {
@@ -428,14 +439,12 @@ func (o *snapshotter) createMountPoint(ctx context.Context, kind snapshots.Kind,
 				return nil, err
 			}
 		}
-
 		switch stype {
 		case storageTypeLocalBlock, storageTypeRemoteBlock:
 			if parent != "" {
 				parentIsAccelLayer := parentInfo.Labels[labelKeyAccelerationLayer] == "yes"
 				needRecordTrace := info.Labels[labelKeyRecordTrace] == "yes"
 				recordTracePath := info.Labels[labelKeyRecordTracePath]
-
 				log.G(ctx).Debugf("Prepare rootfs (parentIsAccelLayer: %t, needRecordTrace: %t, recordTracePath: %s)",
 					parentIsAccelLayer, needRecordTrace, recordTracePath)
 
@@ -550,7 +559,7 @@ func (o *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 			return nil, errors.Wrap(err, "failed to get info")
 		}
 
-		writeType := o.getWritableType(ctx, info)
+		writeType := o.getWritableType(ctx, s.ID, info)
 		if writeType != roDir {
 			return o.basedOnBlockDeviceMount(ctx, s, writeType)
 		}

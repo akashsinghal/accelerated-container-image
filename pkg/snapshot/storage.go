@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"os/exec"
 	"path"
@@ -86,7 +87,7 @@ func (o *snapshotter) unmountAndDetachBlockDevice(ctx context.Context, snID stri
 	if err != nil {
 		return errors.Wrapf(err, "can't get snapshot info.")
 	}
-	writeType := o.getWritableType(ctx, info)
+	writeType := o.getWritableType(ctx, snID, info)
 
 	if writeType != rwDev {
 		mountPoint := o.overlaybdMountpoint(snID)
@@ -173,6 +174,14 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 			return errors.Errorf("failed to enable target for %s, %s", targetPath, data)
 		}
 		return errors.Wrapf(err, "failed to enable target for %s", targetPath)
+	}
+
+	// fixed by fuweid
+	err = ioutil.WriteFile(
+		path.Join(targetPath, "attrib", "cmd_time_out"),
+		([]byte)(fmt.Sprintf("%v", math.MaxInt32/1000)), 0666)
+	if err != nil {
+		return errors.Wrapf(err, "failed to update cmd_time_out")
 	}
 
 	loopDevID := o.overlaybdLoopbackDeviceID(snID)
@@ -312,6 +321,13 @@ func (o *snapshotter) attachAndMountBlockDevice(ctx context.Context, snID string
 						lastErr = errors.Wrapf(err, "failed to mount %s to %s", device, mountPoint)
 						time.Sleep(10 * time.Millisecond)
 						break // retry
+					}
+					// fixed by fuweid
+					err = ioutil.WriteFile(
+						path.Join("/sys/block", dev.Name(), "device", "timeout"),
+						([]byte)(fmt.Sprintf("%v", math.MaxInt32/1000)), 0666)
+					if err != nil {
+						return errors.Wrapf(err, "failed to update timeout")
 					}
 				} else {
 					args := []string{"-t", fstype}
