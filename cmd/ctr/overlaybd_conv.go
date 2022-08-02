@@ -855,6 +855,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 			MediaType:   srcManifestDesc.MediaType,
 			Digest:      srcManifestDesc.Digest,
 			Size:        srcManifestDesc.Size,
+			URLs:        srcManifestDesc.URLs,
 			Annotations: srcManifestDesc.Annotations,
 		},
 	}
