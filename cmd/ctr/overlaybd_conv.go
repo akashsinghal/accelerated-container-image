@@ -118,16 +118,6 @@ var convertCommand = cli.Command{
 			Usage:  "convert to OCI Artifact, add original manifest as referrer, and push to specified registry",
 			Hidden: false,
 		},
-		cli.StringFlag{
-			Name:  "username",
-			Usage: "username of artifact destination registry(required), used for authenticating to destination artifact registry",
-			Value: "",
-		},
-		cli.StringFlag{
-			Name:  "password",
-			Usage: "password of artifact destination registry(required), used for authenticating to destination artifact registry",
-			Value: "",
-		},
 		cli.BoolFlag{
 			Name:   "insecure",
 			Usage:  "allow connections to SSL registry without certs",
@@ -145,8 +135,11 @@ var convertCommand = cli.Command{
 			targetImage = context.Args().Get(1)
 		)
 
-		username = context.String("username")
-		password = context.String("password")
+		username = context.String("user")
+		if i := strings.IndexByte(username, ':'); i > 0 {
+			password = username[i+1:]
+			username = username[0:i]
+		}
 		plainHTTP = context.Bool("plain-http")
 		insecure = context.Bool("insecure")
 		authConfigPath = context.String("auth-config")
