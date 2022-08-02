@@ -219,7 +219,22 @@ var convertCommand = cli.Command{
 			if err != nil {
 				return err
 			}
-			return prepareArtifactAndPush(ctx, cs, srcImg.Target(), newImageManifest, targetImage, cli.ImageService())
+			// if manifest list or OCI index, must get descriptor of appropriate platform to use to attach artifact to
+			srcManifestDesc := srcImg.Target()
+			if srcManifestDesc.MediaType == images.MediaTypeDockerSchema2ManifestList || srcManifestDesc.MediaType == ocispec.MediaTypeImageIndex {
+				manifests, err := images.Children(ctx, cs, srcManifestDesc)
+				if err != nil {
+					return err
+				}
+				platformComparator := platforms.Default()
+				for _, desc := range manifests {
+					if desc.Platform != nil && platformComparator.Match(*desc.Platform) {
+						srcManifestDesc = desc
+						break
+					}
+				}
+			}
+			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newImageManifest, targetImage, cli.ImageService())
 		}
 		return nil
 	},
@@ -840,7 +855,6 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 			MediaType:   srcManifestDesc.MediaType,
 			Digest:      srcManifestDesc.Digest,
 			Size:        srcManifestDesc.Size,
-			URLs:        srcManifestDesc.URLs,
 			Annotations: srcManifestDesc.Annotations,
 		},
 	}
