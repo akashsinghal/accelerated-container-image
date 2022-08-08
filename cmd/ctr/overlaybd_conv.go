@@ -215,13 +215,16 @@ var convertCommand = cli.Command{
 			// if manifest list or OCI index, must get descriptor of appropriate platform to use to attach artifact to
 			srcManifestDesc := srcImg.Target()
 			if srcManifestDesc.MediaType == images.MediaTypeDockerSchema2ManifestList || srcManifestDesc.MediaType == ocispec.MediaTypeImageIndex {
+				fmt.Println("image of type index found")
 				manifests, err := images.Children(ctx, cs, srcManifestDesc)
 				if err != nil {
+					fmt.Println("failed at to get manifests in index: Line 219")
 					return err
 				}
 				platformComparator := platforms.Default()
 				for _, desc := range manifests {
 					if desc.Platform != nil && platformComparator.Match(*desc.Platform) {
+						fmt.Printf("found matching manifest to platform: %v\n", desc.Digest)
 						srcManifestDesc = desc
 						break
 					}
@@ -868,6 +871,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	// create the oras oci store
 	artifactStore, err := ocitarget.New(contentStoreRootPath)
 	if err != nil {
+		fmt.Println("failed to create ORAS store: Line 872")
 		return err
 	}
 
@@ -881,18 +885,21 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	}
 	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
 	if err != nil {
+		fmt.Printf("failed write artifact manifest blob to content store: %v (Line 886)\n", manifestDescriptor.Digest)
 		return err
 	}
 
 	// tag the manifest with a ref
 	err = artifactStore.Tag(ctx, manifestDescriptor, refName)
 	if err != nil {
+		fmt.Println("failed to tag new artifact manifest: Line 893")
 		return err
 	}
 
 	// create Repository Target
 	repository, err := registry.NewRepository(artifactTarget)
 	if err != nil {
+		fmt.Printf("failed to create new repository for target %s: Line 219\n", artifactTarget)
 		return err
 	}
 
@@ -922,6 +929,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	// copy the artifact manifest to remote Repository
 	returnedManifestDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactTarget, oras.DefaultCopyOptions)
 	if err != nil {
+		fmt.Println("failed to push artifact to target: Line 930")
 		return err
 	}
 
