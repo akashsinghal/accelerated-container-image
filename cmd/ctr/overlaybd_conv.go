@@ -262,7 +262,7 @@ var convertCommand = cli.Command{
 					}
 				}
 			}
-			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newImageManifest, destArtifactRef, cli.ImageService())
+			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newMfstDesc, newImageManifest, destArtifactRef, destDadiImage, cli.ImageService())
 		}
 		return nil
 	},
@@ -853,11 +853,27 @@ func (wc *writeCountWrapper) Write(p []byte) (n int, err error) {
 	return
 }
 
-func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDesc ocispec.Descriptor, obdManifest ocispec.Manifest, artifactTarget string, is images.Store) error {
+func prepareArtifactAndPush(ctx context.Context,
+	cs content.Store,
+	srcManifestDesc ocispec.Descriptor,
+	obdManifestDesc ocispec.Descriptor,
+	obdManifest ocispec.Manifest,
+	artifactTarget string,
+	destDadiImage string,
+	is images.Store) error {
 	// create artifact
 	var blobDesc []artifactspec.Descriptor
 
-	// append the config as the first blob
+	// append the OCI DADI manifest descriptor as the first blob
+	blobDesc = append(blobDesc, artifactspec.Descriptor{
+		MediaType:   obdManifestDesc.MediaType,
+		Digest:      obdManifestDesc.Digest,
+		Size:        obdManifestDesc.Size,
+		URLs:        obdManifestDesc.URLs,
+		Annotations: obdManifestDesc.Annotations,
+	})
+
+	// append the config as the second blob
 	obdManifestConfig := obdManifest.Config
 	blobDesc = append(blobDesc, artifactspec.Descriptor{
 		MediaType:   obdManifestConfig.MediaType,
@@ -928,35 +944,10 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 		return err
 	}
 
-	// create Repository Target
-	repository, err := registry.NewRepository(artifactTarget)
+	repository, err := setupOrasClient(ctx, artifactTarget)
 	if err != nil {
-		fmt.Printf("failed to create new repository for target %s: Line 219\n", artifactTarget)
 		return err
 	}
-
-	// set the Repository Client Credentials
-	repositoryClient := &orasauth.Client{
-		Header: http.Header{
-			"User-Agent": {"overlaybd"},
-		},
-		Cache:      orasauth.DefaultCache,
-		Credential: credentialProvider,
-	}
-
-	// set the TSLClientConfig for HTTP client if insecure set to true
-	if insecure {
-		repositoryClient.Client = http.DefaultClient
-		repositoryClient.Client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-		}
-	}
-
-	// set the PlainHTTP to true if specified
-	repository.PlainHTTP = plainHTTP
-	repository.Client = repositoryClient
 
 	// copy the artifact manifest to remote Repository
 	artifactTarget = fmt.Sprintf("%s@%s", artifactTarget, manifestDescriptor.Digest.String())
@@ -966,8 +957,15 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 		return err
 	}
 
-	fmt.Println("Pushed", artifactTarget)
+	fmt.Println("Pushed Artifact: ", artifactTarget)
 	fmt.Println("Digest:", returnedManifestDesc.Digest)
+
+	err = pushOciImage(ctx, artifactStore, obdManifestDesc, destDadiImage)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Pushed OCI DADI Image: ", destDadiImage)
+	fmt.Println("Digest:", obdManifestDesc.Digest)
 	return nil
 }
 
@@ -1015,4 +1013,66 @@ func credentialProvider(ctx context.Context, registry string) (orasauth.Credenti
 	}
 
 	return orasauth.EmptyCredential, nil
+}
+
+func setupOrasClient(ctx context.Context, artifactTarget string) (*registry.Repository, error) {
+	// create Repository Target
+	repository, err := registry.NewRepository(artifactTarget)
+	if err != nil {
+		fmt.Printf("failed to create new repository for target %s: Line 219\n", artifactTarget)
+		return repository, err
+	}
+
+	// set the Repository Client Credentials
+	repositoryClient := &orasauth.Client{
+		Header: http.Header{
+			"User-Agent": {"overlaybd"},
+		},
+		Cache:      orasauth.DefaultCache,
+		Credential: credentialProvider,
+	}
+
+	// set the TSLClientConfig for HTTP client if insecure set to true
+	if insecure {
+		repositoryClient.Client = http.DefaultClient
+		repositoryClient.Client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true,
+			},
+		}
+	}
+
+	// set the PlainHTTP to true if specified
+	repository.PlainHTTP = plainHTTP
+	repository.Client = repositoryClient
+	return repository, nil
+}
+
+func pushOciImage(ctx context.Context, orasStore *ocitarget.Store, manifestDesc ocispec.Descriptor, destRef string) error {
+	parseResult, err := reference.Parse(destRef)
+	if err != nil {
+		return fmt.Errorf("failed to parse dest img reference %v", err)
+	}
+	repository, err := setupOrasClient(ctx, parseResult.Locator)
+	if err != nil {
+		return err
+	}
+
+	// make src ref for manifest
+	srcRef := remotes.MakeRefKey(ctx, manifestDesc)
+
+	// tag the OCI DADI Manifest descriptor for the oras store
+	err = orasStore.Tag(ctx, manifestDesc, srcRef)
+	if err != nil {
+		fmt.Println("failed to tag OCI DADI manifest")
+		return err
+	}
+
+	// copy the OCI DADI Manifest
+	_, err = oras.Copy(ctx, orasStore, srcRef, repository, destRef, oras.DefaultCopyOptions)
+	if err != nil {
+		fmt.Println("failed to push OCI DADI image to target")
+		return err
+	}
+	return nil
 }
