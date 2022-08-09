@@ -11,24 +11,27 @@ There are a few primary motivations for using ORAS Artifact:
 
 ## DADI conversion Process:
 
-The current `obdconv` command for the custom `ctr` cli will be changed to add a `--push-artifact`. For registry authentication, the `--username` and `--password` can be provided OR the `--auth-config` can be filled with the auth config file path. By default if no username/password or auth file is provided, the docker config will be used.
+The current `obdconv` command for the custom `ctr` cli will be changed to add a `--push-artifact`. For registry authentication, the username and password can be provided with `--user username:[password]` and `--password` can be provided OR the `--auth-config` can be filled with the auth config file path. By default if no username/password or auth file is provided, the docker config will be used.
 
 ```
-sudo bin/ctr obdconv --push-artifact --username <TARGET-REGISTRY-USERNAME> --password <TARGET-REGISTRY-PASSWORD> localhost:5000/dadi/redis:original localhost:5000/dadi/redis:oras
+sudo bin/ctr obdconv --push-artifact --user <TARGET-REGISTRY-USERNAME>:<TARGET-REGISTRY-PASSWORD> localhost:5000/dadi/redis:original
 ``` 
 
 Assumptions:
 - The subject image in the artifact manifest is the source image provided
-- The specifed target image parameter specifies the artifact name and registry to push to
+- The subject image comes from a registry that support ORAS referrers API
+- The converted OCI DADI Image is pushed to the same repository path of the source image with the tag being the <alg>-<hex> portion of OCI DADI Image Digest
+  - e.g: source image = `localhost:5000/dadi/redis:original` --> OCI DADI image = `localhost:5000/dadi/redis/obd:sha256-000000000000000000000000000000000000`
 
 New Conversion Flow:
 1. Existing process to use overlaybd to convert the image to DADI image format.
 2. Generate the artifact spec by specifiying the `artifactType` and `mediaType`
 3. Add the original manifest reference in the `subject` field
-4. Add the `config` as the first entry in the `blobs` field
-5. Add all the `layers` to the `blobs` field
-6. Use ORAS go package Push function and provide `blobs` as the file field and pass in the other artifact spec entries as options.
-7. ORAS will push to specified registry. 
+4. Add the OCI DADI manifest descriptor as the first entry in the `blobs` field
+5. Add the `config` as the second entry in the `blobs` field
+6. Add all the `layers` to the `blobs` field
+7. Use ORAS go package Push function and provide `blobs` as the file field and pass in the other artifact spec entries as options.
+8. ORAS will push to specified registry. 
 
 ## New Dependencies
 
@@ -46,7 +49,7 @@ The contents of the artifact are the same as the original image. The only differ
 
 The `artifactType` field is an artifact specific field that can be used to specify artifact specs. Here we use `dadi.image.v1` as the artifact to distinguish the spec.
 
-The `blobs` field is equivalent to the `layers` field. In order to add the config field to the artifact, the standard convention for DADI image artifact is to add the config blob as the first blob in the list.
+The `blobs` field is equivalent to the `layers` field. In order to add the OCI DADI manifest descriptor and the config field to the artifact, the standard convention for DADI image artifact is to add the OCI DADI image descriptor as the first blob in the list and the config blob as the second blob in the list.
 
 The `mediaType` must be `application/vnd.cncf.oras.artifact.manifest.v1+json`
 
@@ -193,6 +196,11 @@ DADI ORAS Artifact Manifest
   "mediaType": "application/vnd.cncf.oras.artifact.manifest.v1+json",
   "artifactType": "dadi.image.v1",
   "blobs": [
+    {
+      "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+      "digest": "sha256:<OCI DADI IMAGE MANIFEST SHA",
+      "size": 3445
+    },
     {
       "mediaType": "application/vnd.docker.container.image.v1+json",
       "digest": "sha256:f873ef3cc686502ddeaeae009da21960cdb027847ceeb2605d0b7560aba85413",

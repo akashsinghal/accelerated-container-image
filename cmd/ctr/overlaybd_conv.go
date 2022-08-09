@@ -31,6 +31,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -189,10 +190,10 @@ var convertCommand = cli.Command{
 		)
 
 		fsType := context.String("fstype")
-		fmt.Printf("filesystem type: %s\n", fsType)
+		log.G(ctx).Infof("filesystem type: %s\n", fsType)
 		dbstr := context.String("dbstr")
 		if dbstr != "" {
-			fmt.Printf("database config string: %s\n", dbstr)
+			log.G(ctx).Infof("database config string: %s\n", dbstr)
 		}
 
 		srcImg, err := ensureImageExist(ctx, cli, srcImage)
@@ -247,19 +248,33 @@ var convertCommand = cli.Command{
 			// if manifest list or OCI index, must get descriptor of appropriate platform to use to attach artifact to
 			srcManifestDesc := srcImg.Target()
 			if srcManifestDesc.MediaType == images.MediaTypeDockerSchema2ManifestList || srcManifestDesc.MediaType == ocispec.MediaTypeImageIndex {
-				fmt.Println("image of type index found")
+				log.G(ctx).Debug("image of type index found")
 				manifests, err := images.Children(ctx, cs, srcManifestDesc)
 				if err != nil {
-					fmt.Println("failed at to get manifests in index: Line 219")
+					log.G(ctx).Debug("failed to get manifests in index: Line 219")
 					return err
 				}
+				var matchingDescs []ocispec.Descriptor
 				platformComparator := platforms.Default()
 				for _, desc := range manifests {
 					if desc.Platform != nil && platformComparator.Match(*desc.Platform) {
-						fmt.Printf("found matching manifest to platform: %v\n", desc.Digest)
-						srcManifestDesc = desc
-						break
+						log.G(ctx).Debugf("found matching manifest to platform: %s\n", desc.Platform.Architecture)
+						matchingDescs = append(matchingDescs, desc)
 					}
+				}
+				sort.SliceStable(matchingDescs, func(i, j int) bool {
+					if matchingDescs[i].Platform == nil {
+						return false
+					}
+					if matchingDescs[j].Platform == nil {
+						return true
+					}
+					return platformComparator.Less(*matchingDescs[i].Platform, *matchingDescs[j].Platform)
+				})
+
+				if len(matchingDescs) > 0 {
+					srcManifestDesc = matchingDescs[0]
+					log.G(ctx).Debugf("selecting manifest with platform architecture: %s\n", srcManifestDesc.Platform.Architecture)
 				}
 			}
 			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newMfstDesc, newImageManifest, destArtifactRef, destDadiImage, cli.ImageService())
@@ -919,7 +934,7 @@ func prepareArtifactAndPush(ctx context.Context,
 	// create the oras oci store
 	artifactStore, err := ocitarget.New(contentStoreRootPath)
 	if err != nil {
-		fmt.Println("failed to create ORAS store: Line 872")
+		log.G(ctx).Debug("failed to create ORAS store: Line 872")
 		return err
 	}
 
@@ -933,14 +948,14 @@ func prepareArtifactAndPush(ctx context.Context,
 	}
 	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
 	if err != nil {
-		fmt.Printf("failed write artifact manifest blob to content store: %v (Line 886)\n", manifestDescriptor.Digest)
+		log.G(ctx).Debugf("failed write artifact manifest blob to content store: %v (Line 886)\n", manifestDescriptor.Digest)
 		return err
 	}
 
 	// tag the manifest with a ref
 	err = artifactStore.Tag(ctx, manifestDescriptor, refName)
 	if err != nil {
-		fmt.Println("failed to tag new artifact manifest: Line 893")
+		log.G(ctx).Debug("failed to tag new artifact manifest: Line 893")
 		return err
 	}
 
@@ -953,19 +968,19 @@ func prepareArtifactAndPush(ctx context.Context,
 	artifactTarget = fmt.Sprintf("%s@%s", artifactTarget, manifestDescriptor.Digest.String())
 	returnedManifestDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactTarget, oras.DefaultCopyOptions)
 	if err != nil {
-		fmt.Println("failed to push artifact to target: Line 930")
+		log.G(ctx).Debug("failed to push artifact to target: Line 930")
 		return err
 	}
 
-	fmt.Println("Pushed Artifact: ", artifactTarget)
-	fmt.Println("Digest:", returnedManifestDesc.Digest)
+	log.G(ctx).Infof("Pushed Artifact: %s", artifactTarget)
+	log.G(ctx).Infof("Digest: %v", returnedManifestDesc.Digest)
 
 	err = pushOciImage(ctx, artifactStore, obdManifestDesc, destDadiImage)
 	if err != nil {
 		return err
 	}
-	fmt.Println("Pushed OCI DADI Image: ", destDadiImage)
-	fmt.Println("Digest:", obdManifestDesc.Digest)
+	log.G(ctx).Infof("Pushed OCI DADI Image: %s", destDadiImage)
+	log.G(ctx).Infof("Digest: %v", obdManifestDesc.Digest)
 	return nil
 }
 
