@@ -75,6 +75,7 @@ const (
 	labelBuildLayerFrom        = "containerd.io/snapshot/overlaybd/build.layer-from"
 	labelDistributionSource    = "containerd.io/distribution.source"
 	contentStoreRootPath       = "/var/lib/containerd/io.containerd.content.v1.content"
+	obdManifestPath            = "obd"
 )
 
 var (
@@ -118,6 +119,11 @@ var convertCommand = cli.Command{
 			Usage:  "convert to OCI Artifact, add original manifest as referrer, and push to specified registry",
 			Hidden: false,
 		},
+		cli.StringFlag{
+			Name:  "obd-repository",
+			Usage: "specify custom repository path appended after src-image for OCI DADI image pushed to registry. Default is 'obd'",
+			Value: "",
+		},
 		cli.BoolFlag{
 			Name:   "insecure",
 			Usage:  "allow connections to SSL registry without certs",
@@ -143,9 +149,23 @@ var convertCommand = cli.Command{
 		plainHTTP = context.Bool("plain-http")
 		insecure = context.Bool("insecure")
 		authConfigPath = context.String("auth-config")
+		pushArtifact := context.Bool("push-artifact")
+		obdRepository := context.String("obd-repository")
 
-		if srcImage == "" || targetImage == "" {
-			return errors.New("please provide src image name(must in local) and dest image name")
+		if obdRepository == "" {
+			obdRepository = obdManifestPath
+		}
+
+		if srcImage == "" {
+			return errors.New("please provide src image name")
+		}
+
+		if pushArtifact && targetImage != "" {
+			return errors.New("please only provide src image name for artifact convert")
+		}
+
+		if !pushArtifact && targetImage == "" {
+			return errors.New("please provide dest image name")
 		}
 
 		cli, ctx, cancel, err := commands.NewClient(context)
@@ -199,6 +219,18 @@ var convertCommand = cli.Command{
 			return err
 		}
 
+		parseResult, err := reference.Parse(srcImage)
+		if err != nil {
+			return fmt.Errorf("failed to parse src img reference %v", err)
+		}
+
+		destDadiImage := fmt.Sprintf("%s/%s:%s-%s", parseResult.Locator, obdRepository, newMfstDesc.Digest.Algorithm().String(), newMfstDesc.Digest.Encoded())
+		destArtifactRef := parseResult.Locator
+
+		if targetImage == "" {
+			targetImage = destDadiImage
+		}
+
 		newImage := images.Image{
 			Name:   targetImage,
 			Target: newMfstDesc,
@@ -207,7 +239,7 @@ var convertCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		if context.Bool("push-artifact") {
+		if pushArtifact {
 			newImageManifest, err := images.Manifest(ctx, cs, newMfstDesc, platforms.Default())
 			if err != nil {
 				return err
@@ -230,7 +262,7 @@ var convertCommand = cli.Command{
 					}
 				}
 			}
-			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newImageManifest, targetImage, cli.ImageService())
+			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newImageManifest, destArtifactRef, cli.ImageService())
 		}
 		return nil
 	},
@@ -927,6 +959,7 @@ func prepareArtifactAndPush(ctx context.Context, cs content.Store, srcManifestDe
 	repository.Client = repositoryClient
 
 	// copy the artifact manifest to remote Repository
+	artifactTarget = fmt.Sprintf("%s@%s", artifactTarget, manifestDescriptor.Digest.String())
 	returnedManifestDesc, err := oras.Copy(ctx, artifactStore, refName, repository, artifactTarget, oras.DefaultCopyOptions)
 	if err != nil {
 		fmt.Println("failed to push artifact to target: Line 930")
