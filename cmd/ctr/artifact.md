@@ -20,28 +20,26 @@ sudo bin/ctr obdconv --push-artifact --user <TARGET-REGISTRY-USERNAME>:<TARGET-R
 Assumptions:
 - The subject image in the artifact manifest is the source image provided
 - The subject image comes from a registry that support ORAS referrers API
-- The converted OCI DADI Image is pushed to the same repository path of the source image with the tag being the <alg>-<hex> portion of OCI DADI Image Digest
-  - e.g: source image = `localhost:5000/dadi/redis:original` --> OCI DADI image = `localhost:5000/dadi/redis/obd:sha256-000000000000000000000000000000000000`
+- The converted OCI DADI Image is pushed to the same repository path of the source image with the tag being the `obd-<alg>-<hex>` of the OCI DADI Image Digest
+  - e.g: source image = `localhost:5000/dadi/redis:original` --> OCI DADI image = `localhost:5000/dadi/redis:obd-sha256-000000000000000000000000000000000000`
 
 New Conversion Flow:
 1. Existing process to use overlaybd to convert the image to DADI image format.
 2. Generate the artifact spec by specifiying the `artifactType` and `mediaType`
 3. Add the original manifest reference in the `subject` field
 4. Add the OCI DADI manifest descriptor as the first entry in the `blobs` field
-5. Add the `config` as the second entry in the `blobs` field
-6. Add all the `layers` to the `blobs` field
-7. Use ORAS go package Push function and provide `blobs` as the file field and pass in the other artifact spec entries as options.
-8. ORAS will push to specified registry. 
+5. Use ORAS go package Push function and provide `blobs` as the file field and pass in the other artifact spec entries as options.
+6. ORAS will push to specified registry. 
 
 ## New Dependencies
 
-- ORAS Go Module: github.com/deislabs/oras v2.0.0-alpha
+- ORAS Go Module: github.com/deislabs/oras v2.0.0-rc.3
 - ORAS containerd: github.com/oras-project/containerd/api
 - ORAS Artifact Spec: github.com/oras-project/artifacts-spec
 
 ## Performance
 
-`obdconv` exection now takes ~ 16.62 seconds to complete for a redis image
+`obdconv` exection now takes ~ 20 seconds to complete for a redis image 
 
 ## Converting from DADI OCI Image to DADI ORAS Artifact
 
