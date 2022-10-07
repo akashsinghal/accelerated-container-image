@@ -8,6 +8,7 @@ require (
 	github.com/containerd/go-cni v1.1.5
 	github.com/docker/cli v0.0.0-20191017083524-a8ff7f821017
 	github.com/go-sql-driver/mysql v1.6.0
+	github.com/klauspost/compress v1.15.9 // indirect
 	github.com/moby/sys/mountinfo v0.5.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.0.3-0.20211202183452-c5a74bcca799
