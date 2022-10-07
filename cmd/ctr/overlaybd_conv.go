@@ -219,7 +219,7 @@ var convertCommand = cli.Command{
 			return fmt.Errorf("failed to parse src img reference %v", err)
 		}
 
-		destDadiImage := fmt.Sprintf("%s:%s-%s-%s", parseResult.Locator, obdManifestTagPrefix, newMfstDesc.Digest.Algorithm().String(), newMfstDesc.Digest.Encoded())
+		destDadiImage := fmt.Sprintf("%s:%s-%s", parseResult.Locator, parseResult.Object, obdManifestTagPrefix)
 		destArtifactRef := parseResult.Locator
 
 		if targetImage == "" {

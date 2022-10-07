@@ -20,8 +20,8 @@ sudo bin/ctr obdconv --push-artifact --user <TARGET-REGISTRY-USERNAME>:<TARGET-R
 Assumptions:
 - The subject image in the artifact manifest is the source image provided
 - The subject image comes from a registry that support ORAS referrers API
-- The converted OCI DADI Image is pushed to the same repository path of the source image with the tag being the `obd-<alg>-<hex>` of the OCI DADI Image Digest
-  - e.g: source image = `localhost:5000/dadi/redis:original` --> OCI DADI image = `localhost:5000/dadi/redis:obd-sha256-000000000000000000000000000000000000`
+- The converted OCI DADI Image is pushed to the same repository path of the source image with the tag being the `<original_tag>-obd` of the OCI DADI Image 
+  - e.g: source image = `localhost:5000/dadi/redis:original` --> OCI DADI image = `localhost:5000/dadi/redis:original-obd`
 
 New Conversion Flow:
 1. Existing process to use overlaybd to convert the image to DADI image format.
@@ -198,81 +198,6 @@ DADI ORAS Artifact Manifest
       "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
       "digest": "sha256:<OCI DADI IMAGE MANIFEST SHA",
       "size": 3445
-    },
-    {
-      "mediaType": "application/vnd.docker.container.image.v1+json",
-      "digest": "sha256:f873ef3cc686502ddeaeae009da21960cdb027847ceeb2605d0b7560aba85413",
-      "size": 3445
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:a8b5fca80efae55088290f3da8110d7742de55c2a378d5ab53226a483f390e21",
-      "size": 4739584,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:a8b5fca80efae55088290f3da8110d7742de55c2a378d5ab53226a483f390e21",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "4739584"
-      }
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:cab750ab5436f7f22b18314a15ced78a8375c57e0ffeb1409dae5408273deb5e",
-      "size": 43513344,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:cab750ab5436f7f22b18314a15ced78a8375c57e0ffeb1409dae5408273deb5e",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "43513344"
-      }
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:f9aa97b3fac30f61648e744ecef6512223f6b321c270ce47b9032f9d403e789c",
-      "size": 27136,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:f9aa97b3fac30f61648e744ecef6512223f6b321c270ce47b9032f9d403e789c",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "27136"
-      }
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:387c9cba0a40b6dba603472a0d9d69315e6b066cd456c4a25670c20ff7bf3f89",
-      "size": 2614272,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:387c9cba0a40b6dba603472a0d9d69315e6b066cd456c4a25670c20ff7bf3f89",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "2614272"
-      }
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:b5c32659aad8da248d33c139f458712b3350fa58706170009f893f7cb7f7e75b",
-      "size": 17311744,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:b5c32659aad8da248d33c139f458712b3350fa58706170009f893f7cb7f7e75b",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "17311744"
-      }
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:d3cfb88c2b81025caa87d97783a9affae69f84b963ff27a5746afdc70d65c39e",
-      "size": 8192,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:d3cfb88c2b81025caa87d97783a9affae69f84b963ff27a5746afdc70d65c39e",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "8192"
-      }
-    },
-    {
-      "mediaType": "application/vnd.oci.image.layer.v1.tar",
-      "digest": "sha256:af4673f4ecad6e2c00e943522ca06dbbe59f00b92e018f7e83fc6de95d8dea8f",
-      "size": 12288,
-      "annotations": {
-        "containerd.io/snapshot/overlaybd/blob-digest": "sha256:af4673f4ecad6e2c00e943522ca06dbbe59f00b92e018f7e83fc6de95d8dea8f",
-        "containerd.io/snapshot/overlaybd/blob-fs-type": "ext4",
-        "containerd.io/snapshot/overlaybd/blob-size": "12288"
-      }
     }
   ],
   "subject": {
