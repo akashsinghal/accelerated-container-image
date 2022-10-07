@@ -31,7 +31,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -76,7 +75,7 @@ const (
 	labelBuildLayerFrom        = "containerd.io/snapshot/overlaybd/build.layer-from"
 	labelDistributionSource    = "containerd.io/distribution.source"
 	contentStoreRootPath       = "/var/lib/containerd/io.containerd.content.v1.content"
-	obdManifestPath            = "obd"
+	obdManifestTagPrefix       = "obd"
 )
 
 var (
@@ -151,11 +150,6 @@ var convertCommand = cli.Command{
 		insecure = context.Bool("insecure")
 		authConfigPath = context.String("auth-config")
 		pushArtifact := context.Bool("push-artifact")
-		obdRepository := context.String("obd-repository")
-
-		if obdRepository == "" {
-			obdRepository = obdManifestPath
-		}
 
 		if srcImage == "" {
 			return errors.New("please provide src image name")
@@ -225,7 +219,7 @@ var convertCommand = cli.Command{
 			return fmt.Errorf("failed to parse src img reference %v", err)
 		}
 
-		destDadiImage := fmt.Sprintf("%s/%s:%s-%s", parseResult.Locator, obdRepository, newMfstDesc.Digest.Algorithm().String(), newMfstDesc.Digest.Encoded())
+		destDadiImage := fmt.Sprintf("%s:%s-%s-%s", parseResult.Locator, obdManifestTagPrefix, newMfstDesc.Digest.Algorithm().String(), newMfstDesc.Digest.Encoded())
 		destArtifactRef := parseResult.Locator
 
 		if targetImage == "" {
@@ -245,38 +239,7 @@ var convertCommand = cli.Command{
 			if err != nil {
 				return err
 			}
-			// if manifest list or OCI index, must get descriptor of appropriate platform to use to attach artifact to
 			srcManifestDesc := srcImg.Target()
-			if srcManifestDesc.MediaType == images.MediaTypeDockerSchema2ManifestList || srcManifestDesc.MediaType == ocispec.MediaTypeImageIndex {
-				log.G(ctx).Debug("image of type index found")
-				manifests, err := images.Children(ctx, cs, srcManifestDesc)
-				if err != nil {
-					log.G(ctx).Debug("failed to get manifests in index: Line 219")
-					return err
-				}
-				var matchingDescs []ocispec.Descriptor
-				platformComparator := platforms.Default()
-				for _, desc := range manifests {
-					if desc.Platform != nil && platformComparator.Match(*desc.Platform) {
-						log.G(ctx).Debugf("found matching manifest to platform: %s\n", desc.Platform.Architecture)
-						matchingDescs = append(matchingDescs, desc)
-					}
-				}
-				sort.SliceStable(matchingDescs, func(i, j int) bool {
-					if matchingDescs[i].Platform == nil {
-						return false
-					}
-					if matchingDescs[j].Platform == nil {
-						return true
-					}
-					return platformComparator.Less(*matchingDescs[i].Platform, *matchingDescs[j].Platform)
-				})
-
-				if len(matchingDescs) > 0 {
-					srcManifestDesc = matchingDescs[0]
-					log.G(ctx).Debugf("selecting manifest with platform architecture: %s\n", srcManifestDesc.Platform.Architecture)
-				}
-			}
 			return prepareArtifactAndPush(ctx, cs, srcManifestDesc, newMfstDesc, newImageManifest, destArtifactRef, destDadiImage, cli.ImageService())
 		}
 		return nil
@@ -876,41 +839,21 @@ func prepareArtifactAndPush(ctx context.Context,
 	artifactTarget string,
 	destDadiImage string,
 	is images.Store) error {
-	// create artifact
-	var blobDesc []artifactspec.Descriptor
 
 	// append the OCI DADI manifest descriptor as the first blob
-	blobDesc = append(blobDesc, artifactspec.Descriptor{
+	blobDesc := []artifactspec.Descriptor{{
 		MediaType:   obdManifestDesc.MediaType,
 		Digest:      obdManifestDesc.Digest,
 		Size:        obdManifestDesc.Size,
 		URLs:        obdManifestDesc.URLs,
 		Annotations: obdManifestDesc.Annotations,
-	})
+	}}
 
-	// append the config as the second blob
-	obdManifestConfig := obdManifest.Config
-	blobDesc = append(blobDesc, artifactspec.Descriptor{
-		MediaType:   obdManifestConfig.MediaType,
-		Digest:      obdManifestConfig.Digest,
-		Size:        obdManifestConfig.Size,
-		URLs:        obdManifestConfig.URLs,
-		Annotations: obdManifestConfig.Annotations,
-	})
-	for _, layer := range obdManifest.Layers {
-		blobDesc = append(blobDesc, artifactspec.Descriptor{
-			MediaType:   layer.MediaType,
-			Digest:      layer.Digest,
-			Size:        layer.Size,
-			URLs:        layer.URLs,
-			Annotations: layer.Annotations,
-		})
-	}
 	artifactManifest := artifactspec.Manifest{
 		MediaType:    "application/vnd.cncf.oras.artifact.manifest.v1+json",
 		Blobs:        blobDesc,
 		ArtifactType: artifactTypeName,
-		Subject: artifactspec.Descriptor{
+		Subject: &artifactspec.Descriptor{
 			MediaType:   srcManifestDesc.MediaType,
 			Digest:      srcManifestDesc.Digest,
 			Size:        srcManifestDesc.Size,
@@ -942,10 +885,6 @@ func prepareArtifactAndPush(ctx context.Context,
 	// add garbage collection reference labels so blobs are not deleted
 	labels := map[string]string{}
 	labels["containerd.io/gc.root"] = string(manifestDescriptor.Digest)
-	labels["containerd.io/gc.ref.content.config"] = obdManifestConfig.Digest.String()
-	for i, ch := range obdManifest.Layers {
-		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = ch.Digest.String()
-	}
 	err = content.WriteBlob(ctx, cs, refName, bytes.NewReader(manifestBytes), manifestDescriptor, content.WithLabels(labels))
 	if err != nil {
 		log.G(ctx).Debugf("failed write artifact manifest blob to content store: %v (Line 886)\n", manifestDescriptor.Digest)
